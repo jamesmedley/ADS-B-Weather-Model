@@ -2,8 +2,6 @@
 
 An Attentive Neural Process (ANP) that predicts wind vectors from ADS-B aircraft observations. Given a set of aircraft-derived wind measurements (direction and speed) at known positions, the model learns to interpolate wind fields across a region and quantify its own uncertainty.
 
-![Predicted wind flow](outputs/imgs/wind_flow_test.gif)
-
 ![Predicted wind field](outputs/imgs/wind_field.png)
 
 ## How it works
