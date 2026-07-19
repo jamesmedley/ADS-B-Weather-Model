@@ -32,7 +32,7 @@ import matplotlib.pyplot as plt
 
 from wind_map.network import LatentModel
 from wind_map.preprocess import (
-    normalise_coords, MAX_WIND_KT, day_grouped_split
+    normalise_coords, WIND_SPEED_MEAN, WIND_SPEED_STD, day_grouped_split
 )
 from wind_map.utils import (
     circular_mean, circular_std, pick_snapshot,
@@ -63,7 +63,7 @@ def obs_to_tensors(observations, device):
         xs.append([lat_n, lon_n, alt_n])
         ys.append([
             math.sin(rad), math.cos(rad),
-            obs['wind_speed'] / MAX_WIND_KT])
+            (obs['wind_speed'] - WIND_SPEED_MEAN) / WIND_SPEED_STD])
     x = torch.FloatTensor(xs).unsqueeze(0).to(device)
     y = torch.FloatTensor(ys).unsqueeze(0).to(device)
     return x, y
@@ -93,7 +93,7 @@ def predict_components(model, context, queries, n_samples, device):
     spd_mu = mu_stack[..., 2]
 
     sample_dirs = np.degrees(np.arctan2(sin_mu, cos_mu)) % 360
-    sample_speeds = np.clip(spd_mu, 0, None) * MAX_WIND_KT
+    sample_speeds = np.clip(spd_mu, 0, None) * WIND_SPEED_STD + WIND_SPEED_MEAN
 
     mean_dirs = circular_mean(sample_dirs, axis=0)
     mean_speeds = sample_speeds.mean(axis=0)
@@ -113,7 +113,7 @@ def predict_components(model, context, queries, n_samples, device):
     aleatoric_dir_var_deg2 = np.degrees(np.sqrt(aleatoric_dir_var_rad2)) ** 2
     aleatoric_dir_std = np.sqrt(aleatoric_dir_var_deg2.mean(axis=0))
 
-    aleatoric_speed_var = (spd_sig * MAX_WIND_KT) ** 2
+    aleatoric_speed_var = (spd_sig * WIND_SPEED_STD) ** 2
     aleatoric_speed_std = np.sqrt(aleatoric_speed_var.mean(axis=0))
 
     return {

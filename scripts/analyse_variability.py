@@ -17,7 +17,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from wind_map.preprocess import (
-    CENTRE_LAT, LAT_RANGE_DEG, MAX_ALT_FT, MAX_WIND_KT
+    CENTRE_LAT, LAT_RANGE_DEG, MAX_ALT_FT, WIND_SPEED_MEAN, WIND_SPEED_STD
 )
 
 
@@ -33,7 +33,7 @@ def to_physical(x, y):
     lat_deg = x[:, 0] * LAT_RANGE_DEG + CENTRE_LAT
     alt_ft = x[:, 2] * MAX_ALT_FT
     dir_deg = np.degrees(np.arctan2(y[:, 0], y[:, 1])) % 360
-    speed_kt = y[:, 2] * MAX_WIND_KT
+    speed_kt = y[:, 2] * WIND_SPEED_STD + WIND_SPEED_MEAN
     return lat_deg, alt_ft, dir_deg, speed_kt
 
 
@@ -55,7 +55,7 @@ def leave_one_out_residuals(x, y, offsets):
 
         sin_s = sin_all[start:end]
         cos_s = cos_all[start:end]
-        spd_s = spd_all[start:end] * MAX_WIND_KT
+        spd_s = spd_all[start:end] * WIND_SPEED_STD + WIND_SPEED_MEAN
         lat_s = x[start:end, 0] * LAT_RANGE_DEG + CENTRE_LAT
         alt_s = x[start:end, 2] * MAX_ALT_FT
 

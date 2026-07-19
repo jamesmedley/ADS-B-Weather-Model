@@ -7,7 +7,7 @@ Coordinate normalisation:
   lat/lon : centred and scaled to ~[-1, 1] over the service area
   altitude: divided by 50,000 ft -> [0, 1]
   wind_dir: encoded as (sin, cos) to handle circularity
-  wind_speed: divided by MAX_WIND_KT -> [0, 1]
+  wind_speed: z-score normalised (mean 0, std 1) over dataset
 
 Network input x  -> [lat_norm, lon_norm, alt_norm]          (dim=3)
 Network output y -> [wind_dir_sin, wind_dir_cos, speed_norm] (dim=3)
@@ -26,7 +26,8 @@ CENTRE_LAT = 51.071066
 CENTRE_LON = -1.042441
 
 MAX_ALT_FT = 50_000.0
-MAX_WIND_KT = 200.0
+WIND_SPEED_MEAN = 35.09  # placeholder — computed by convert_db.py
+WIND_SPEED_STD = 23.08    # placeholder — computed by convert_db.py
 MIN_AIRCRAFT = 2
 
 # Half-width of the service area in degrees (~70km radius)
@@ -50,7 +51,10 @@ def encode_wind(wind_dir_deg, wind_speed_kt):
     Returns (sin, cos, speed_norm).
     """
     rad = math.radians(wind_dir_deg)
-    return math.sin(rad), math.cos(rad), wind_speed_kt / MAX_WIND_KT
+    return (
+        math.sin(rad), math.cos(rad),
+        (wind_speed_kt - WIND_SPEED_MEAN) / WIND_SPEED_STD
+    )
 
 
 def decode_wind(sin_val, cos_val, speed_norm):
@@ -59,7 +63,7 @@ def decode_wind(sin_val, cos_val, speed_norm):
     Returns (wind_dir_deg [0,360), wind_speed_kt).
     """
     deg = math.degrees(math.atan2(sin_val, cos_val)) % 360
-    speed = speed_norm * MAX_WIND_KT
+    speed = speed_norm * WIND_SPEED_STD + WIND_SPEED_MEAN
     return deg, speed
 
 

@@ -13,10 +13,9 @@ RUN pip install --no-cache-dir \
         eccodes \
         scikit-optimize
 
-WORKDIR /homes/jm3320/wind-map
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY pyproject.toml .
-COPY wind_map/ ./wind_map/
-COPY scripts/ ./scripts/
-RUN pip install --no-cache-dir .
+
+ENV PYTHONPATH=/homes/jm3320/wind-map
+
+WORKDIR /homes/jm3320/wind-map

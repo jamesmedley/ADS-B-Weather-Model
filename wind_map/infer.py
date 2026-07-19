@@ -12,7 +12,9 @@ Example:
 import torch
 import numpy as np
 from wind_map.network import LatentModel
-from wind_map.preprocess import normalise_coords, encode_wind, MAX_WIND_KT
+from wind_map.preprocess import (
+    normalise_coords, encode_wind, WIND_SPEED_MEAN, WIND_SPEED_STD
+)
 from wind_map.utils import circular_mean, circular_std
 
 
@@ -91,7 +93,10 @@ class WindPredictor:
         spd_mu = mu_stack[..., 2]
 
         sample_dirs = np.degrees(np.arctan2(sin_mu, cos_mu)) % 360
-        sample_speeds = np.clip(spd_mu, 0, None) * MAX_WIND_KT
+        sample_speeds = (
+            np.clip(spd_mu, 0, None)
+            * WIND_SPEED_STD + WIND_SPEED_MEAN
+        )
 
         mean_dirs = circular_mean(sample_dirs, axis=0)
         mean_speeds = sample_speeds.mean(axis=0)
@@ -115,7 +120,7 @@ class WindPredictor:
         )
         mean_aleatoric_dir_var = aleatoric_dir_var_deg2.mean(axis=0)
 
-        aleatoric_speed_var = (spd_sig * MAX_WIND_KT) ** 2
+        aleatoric_speed_var = (spd_sig * WIND_SPEED_STD) ** 2
         mean_aleatoric_speed_var = aleatoric_speed_var.mean(axis=0)
 
         # Total variance = epistemic + aleatoric

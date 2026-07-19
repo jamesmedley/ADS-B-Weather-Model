@@ -22,7 +22,7 @@ from torch.utils.data import DataLoader
 
 from wind_map.network import LatentModel
 from wind_map.preprocess import (
-    WindSnapshotDataset, day_grouped_split, MAX_WIND_KT
+    WindSnapshotDataset, day_grouped_split, WIND_SPEED_MEAN, WIND_SPEED_STD
 )
 
 
@@ -211,14 +211,14 @@ def evaluate(checkpoint_path, cache_dir, split='test', num_hidden=None,
                 mean_mu_np[..., 0], mean_mu_np[..., 1]
             )
         ) % 360
-        pred_speed = mean_mu_np[..., 2] * MAX_WIND_KT
+        pred_speed = mean_mu_np[..., 2] * WIND_SPEED_STD + WIND_SPEED_MEAN
         true_dir = np.degrees(
             np.arctan2(
                 target_y_np[..., 0],
                 target_y_np[..., 1]
             )
         ) % 360
-        true_speed = target_y_np[..., 2] * MAX_WIND_KT
+        true_speed = target_y_np[..., 2] * WIND_SPEED_STD + WIND_SPEED_MEAN
 
         speed_err = pred_speed - true_speed
         dir_err = _circular_abs_diff_deg(pred_dir, true_dir)

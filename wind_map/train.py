@@ -74,10 +74,8 @@ def train(cache_dir, num_hidden=128, epochs=200,
     """
     device = t.device(
         'cuda' if t.cuda.is_available() else 'cpu')
-    use_amp = device.type == 'cuda'
     if verbose:
-        amp_msg = " + AMP" if use_amp else ""
-        print(f"Training on {device}{amp_msg}")
+        print(f"Training on {device}")
 
     # --- Data ---
     train_ids, val_ids, test_ids = day_grouped_split(
@@ -157,9 +155,6 @@ def train(cache_dir, num_hidden=128, epochs=200,
     # --- EMA ---
     ema = EMA(model, decay=ema_decay)
 
-    # --- AMP scaler ---
-    scaler = t.amp.GradScaler(device.type)
-
     global_step = 0
     best_val_loss = float('inf')
     best_epoch = None
@@ -198,20 +193,17 @@ def train(cache_dir, num_hidden=128, epochs=200,
             context_mask = context_mask.to(device)
             target_mask = target_mask.to(device)
 
-            with t.amp.autocast(device.type, enabled=use_amp):
-                mu, sigma, kl, loss = model(
-                    context_x, context_y,
-                    target_x, target_y,
-                    context_mask=context_mask,
-                    target_mask=target_mask)
+            mu, sigma, kl, loss = model(
+                context_x, context_y,
+                target_x, target_y,
+                context_mask=context_mask,
+                target_mask=target_mask)
 
             optim.zero_grad()
-            scaler.scale(loss).backward()
-            scaler.unscale_(optim)
+            loss.backward()
             t.nn.utils.clip_grad_norm_(
                 model.parameters(), max_norm=1.0)
-            scaler.step(optim)
-            scaler.update()
+            optim.step()
             scheduler.step()
             ema.update(model)
 
@@ -252,13 +244,11 @@ def train(cache_dir, num_hidden=128, epochs=200,
                     context_mask.to(device))
                 target_mask = (
                     target_mask.to(device))
-                with t.amp.autocast(
-                        device.type, enabled=use_amp):
-                    _, _, _, loss = model(
-                        context_x, context_y,
-                        target_x, target_y,
-                        context_mask=context_mask,
-                        target_mask=target_mask)
+                _, _, _, loss = model(
+                    context_x, context_y,
+                    target_x, target_y,
+                    context_mask=context_mask,
+                    target_mask=target_mask)
                 val_loss_sum += loss.item()
         ema.restore(model)
 
@@ -354,13 +344,11 @@ def train(cache_dir, num_hidden=128, epochs=200,
                     context_mask.to(device))
                 target_mask = (
                     target_mask.to(device))
-                with t.amp.autocast(
-                        device.type, enabled=use_amp):
-                    _, _, _, loss = model(
-                        context_x, context_y,
-                        target_x, target_y,
-                        context_mask=context_mask,
-                        target_mask=target_mask)
+                _, _, _, loss = model(
+                    context_x, context_y,
+                    target_x, target_y,
+                    context_mask=context_mask,
+                    target_mask=target_mask)
                 test_loss_sum += loss.item()
         avg_test = (
             test_loss_sum / len(test_loader))

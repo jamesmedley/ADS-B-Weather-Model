@@ -15,9 +15,6 @@ That said, there are several concrete issues, inconsistencies, and high-impact e
 
 ## 1. Bugs & Inconsistencies
 
-### b) Wind speed exceeds normalization constant
-
-`MAX_WIND_KT = 200` but the data contains observations up to 248 kt (`wind_speed_kt` max). This means normalized speed values exceed 1.0 (up to 1.24). The model can learn this, but it's inconsistent with the documented design intent of `[0, 1]` range. Either increase `MAX_WIND_KT` to 250 or clip in `convert_db.py`.
 
 ### e) Coverage metric computed in raw normalized space
 
@@ -33,17 +30,9 @@ Coverage should be computed separately for wind direction (in degrees) and wind 
 
 ## 2. Model Architecture Observations
 
-### a) Latent encoder sigma is tightly bounded [0.1, 1.0]
-
-`module.py:258`: `sigma = 0.1 + 0.9 * sigmoid(log_sigma)` means the latent z can never have variance below 0.1² or above 1.0². This is quite restrictive. When you have many context observations covering a region, the posterior should collapse to very low uncertainty (sigma → 0). The floor of 0.1 is fine, but the ceiling of 1.0 may prevent the model from expressing high uncertainty when context is very sparse. Consider widening to `[0.1, 2.0]` or `[0.05, 2.0]`.
-
 ### b) No positional encoding for the input coordinates
 
 The raw (lat, lon, alt) coordinates go directly into the MLP. For spatial interpolation tasks, **Fourier feature mapping** (NeRF-style) can dramatically improve the model's ability to learn high-frequency spatial patterns. This is a well-known technique that's particularly relevant here since wind fields have spatial structure at multiple scales (synoptic-scale gradients, local orographic effects, etc.).
-
-### c) Decoder has no dropout
-
-The `Decoder` class in `module.py:263-277` has no dropout, unlike the encoder's `TransformerBlock`. The best HP search found `dropout=0.19`, but this only applies to the encoder. Adding dropout to the decoder MLP could help regularize, especially given the small dataset.
 
 ### d) Single latent variable z may be too compressed
 

@@ -29,7 +29,7 @@ import numpy as np
 from wind_map.preprocess import (
     normalise_coords, encode_wind, MIN_AIRCRAFT,
     CENTRE_LAT, CENTRE_LON, LAT_RANGE_DEG, LON_RANGE_DEG,
-    MAX_ALT_FT, MAX_WIND_KT,
+    MAX_ALT_FT,
 )
 
 
@@ -92,6 +92,7 @@ def convert(db_path, out_dir, min_aircraft=MIN_AIRCRAFT):
     x_chunks, y_chunks = [], []
     offsets = np.zeros(len(snapshot_ids) + 1, dtype=np.int64)
     total_rows = 0
+    all_wind_speeds = []
 
     for i, sid in enumerate(snapshot_ids):
         rows = rows_by_snapshot.get(sid, [])
@@ -103,6 +104,7 @@ def convert(db_path, out_dir, min_aircraft=MIN_AIRCRAFT):
                 sin_w, cos_w, spd_n = encode_wind(wind_dir, wind_speed)
                 xs[j] = (lat_n, lon_n, alt_n)
                 ys[j] = (sin_w, cos_w, spd_n)
+                all_wind_speeds.append(wind_speed)
             x_chunks.append(xs)
             y_chunks.append(ys)
             total_rows += len(rows)
@@ -132,6 +134,9 @@ def convert(db_path, out_dir, min_aircraft=MIN_AIRCRAFT):
     np.save(os.path.join(out_dir, 'offsets.npy'), offsets)
 
     empty_snapshots = int(np.sum(np.diff(offsets) == 0))
+    wind_speeds_arr = np.array(all_wind_speeds)
+    computed_mean = float(wind_speeds_arr.mean())
+    computed_std = float(wind_speeds_arr.std())
     meta = {
         'source_db': os.path.abspath(db_path),
         'min_aircraft': min_aircraft,
@@ -144,7 +149,8 @@ def convert(db_path, out_dir, min_aircraft=MIN_AIRCRAFT):
             'lat_range_deg': LAT_RANGE_DEG,
             'lon_range_deg': LON_RANGE_DEG,
             'max_alt_ft': MAX_ALT_FT,
-            'max_wind_kt': MAX_WIND_KT,
+            'wind_speed_mean_kt': computed_mean,
+            'wind_speed_std_kt': computed_std,
         },
         'created': time.strftime('%Y-%m-%d %H:%M:%S'),
     }
@@ -154,6 +160,8 @@ def convert(db_path, out_dir, min_aircraft=MIN_AIRCRAFT):
     dt = time.time() - t0
     print(f"  {len(snapshot_ids)} snapshots  ({empty_snapshots} empty)")
     print(f"  {total_rows} observations written")
+    print(f"  wind speed stats: mean={computed_mean:.2f} kt"
+          f"  std={computed_std:.2f} kt")
     print(f"  cache written to {out_dir}/ in {dt:.1f}s")
     print(
         f"    x.npy: {x_all.shape} {x_all.dtype}"
