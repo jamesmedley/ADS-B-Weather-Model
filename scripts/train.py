@@ -52,6 +52,9 @@ if __name__ == '__main__':
         '--init_checkpoint', default=None,
         help='Optional pretrained checkpoint '
              'to initialise from')
+    parser.add_argument(
+        '--no-amp', action='store_true',
+        help='Disable automatic mixed precision')
 
     args = parser.parse_args()
 
@@ -70,4 +73,5 @@ if __name__ == '__main__':
         checkpoint_dir=args.checkpoint_dir,
         init_checkpoint=args.init_checkpoint,
         patience=args.patience,
+        use_amp=not args.no_amp,
     )

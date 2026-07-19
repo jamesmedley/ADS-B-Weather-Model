@@ -27,7 +27,8 @@ n = 0
 
 def make_objective(cache_dir, search_epochs,
                    num_workers, split_seed,
-                   warmup_frac, dropout, patience):
+                   warmup_frac, dropout, patience,
+                   use_amp):
     def objective(params):
         global n
         n += 1
@@ -55,6 +56,7 @@ def make_objective(cache_dir, search_epochs,
             split_seed=split_seed,
             verbose=True,
             patience=patience,
+            use_amp=use_amp,
         )
 
         val_loss = train_result['best_val_loss']
@@ -82,12 +84,16 @@ if __name__ == '__main__':
     p.add_argument('--split-seed', type=int, default=42)
     p.add_argument('--random-state', type=int, default=42)
     p.add_argument('--out', default='hp_optim_results.pkl')
+    p.add_argument('--no-amp', action='store_true',
+                   help='Disable automatic mixed precision')
 
     args = p.parse_args()
 
-    objective = make_objective(args.cache, args.search_epochs, args.workers,
-                               args.split_seed, args.warmup_frac, args.dropout,
-                               args.patience)
+    objective = make_objective(
+        args.cache, args.search_epochs, args.workers,
+        args.split_seed, args.warmup_frac, args.dropout,
+        args.patience,
+        use_amp=not args.no_amp)
 
     result = gp_minimize(
         objective, space,

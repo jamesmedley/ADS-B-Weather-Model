@@ -20,34 +20,64 @@ from torch.utils.data import DataLoader
 
 
 class EMA:
-    """Exponential moving average of model parameters."""
+    """Exponential moving average using a single flat buffer.
+
+    All shadow parameters are stored in one contiguous tensor so
+    the update does one ``mul_`` + one ``add_`` per step instead of
+    one per parameter tensor (avoids ~100 CUDA kernel launches).
+    """
 
     def __init__(self, model, decay=0.999):
         self.decay = decay
-        self.shadow = {
-            name: param.clone().detach()
-            for name, param in model.named_parameters()
-        }
+        self._params = list(model.parameters())
+        self._sizes = [p.numel() for p in self._params]
+        self._offsets = []
+        off = 0
+        for s in self._sizes:
+            self._offsets.append(off)
+            off += s
+        self._total = off
+        self.shadow = t.cat(
+            [p.data.reshape(-1) for p in self._params]
+        ).clone().detach()
+        self._backup = t.empty_like(self.shadow)
+        self._device = self.shadow.device
 
     @t.no_grad()
     def update(self, model):
-        for name, param in model.named_parameters():
-            self.shadow[name].mul_(self.decay).add_(
-                param.data, alpha=1 - self.decay
-            )
+        # Build flat view of current params (one cat, one kernel)
+        flat = t.cat(
+            [p.data.reshape(-1) for p in model.parameters()]
+        )
+        # Single mul + add on the entire buffer
+        self.shadow.mul_(self.decay).add_(
+            flat, alpha=1 - self.decay
+        )
+
+    def _to_shadow(self, model):
+        """Copy shadow -> model parameters."""
+        for p, off, sz in zip(
+                self._params, self._offsets, self._sizes):
+            p.data.copy_(self.shadow[off:off + sz].reshape(p.shape))
+
+    def _from_model(self, model):
+        """Copy model parameters -> shadow."""
+        for p, off, sz in zip(
+                self._params, self._offsets, self._sizes):
+            self.shadow[off:off + sz].copy_(
+                p.data.reshape(-1))
 
     def apply_shadow(self, model):
-        self.backup = {
-            name: param.clone()
-            for name, param in model.named_parameters()
-        }
-        for name, param in model.named_parameters():
-            param.data.copy_(self.shadow[name])
+        flat = t.cat(
+            [p.data.reshape(-1) for p in self._params])
+        self._backup.copy_(flat)
+        self._to_shadow(model)
 
     def restore(self, model):
-        for name, param in model.named_parameters():
-            param.data.copy_(self.backup[name])
-        del self.backup
+        for p, off, sz in zip(
+                self._params, self._offsets, self._sizes):
+            p.data.copy_(
+                self._backup[off:off + sz].reshape(p.shape))
 
 
 def train(cache_dir, num_hidden=128, epochs=200,
@@ -59,7 +89,8 @@ def train(cache_dir, num_hidden=128, epochs=200,
           checkpoint_dir='./checkpoint',
           save_checkpoint=True,
           run_test_eval=True, verbose=True, patience=50,
-          ema_decay=0.999):
+          ema_decay=0.999,
+          use_amp=True):
     """
     Train the Wind ANP.
 
@@ -68,6 +99,8 @@ def train(cache_dir, num_hidden=128, epochs=200,
     run_test_eval=False skips the held-out test eval
     (test set should only be touched once, on the final
     chosen config).
+
+    use_amp: use automatic mixed precision (1.5-3x speedup).
 
     Returns dict with: best_val_loss, best_epoch,
     checkpoint_path, test_loss.
@@ -94,15 +127,18 @@ def train(cache_dir, num_hidden=128, epochs=200,
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
         collate_fn=collate_fn, num_workers=num_workers,
-        persistent_workers=use_persistent_workers)
+        persistent_workers=use_persistent_workers,
+        pin_memory=(device.type == 'cuda'))
     val_loader = DataLoader(
         val_ds, batch_size=batch_size, shuffle=False,
         collate_fn=collate_fn_val, num_workers=num_workers,
-        persistent_workers=use_persistent_workers)
+        persistent_workers=use_persistent_workers,
+        pin_memory=(device.type == 'cuda'))
     test_loader = DataLoader(
         test_ds, batch_size=batch_size, shuffle=False,
         collate_fn=collate_fn_val, num_workers=num_workers,
-        persistent_workers=use_persistent_workers)
+        persistent_workers=use_persistent_workers,
+        pin_memory=(device.type == 'cuda'))
 
     # --- Model ---
     model = LatentModel(
@@ -128,6 +164,25 @@ def train(cache_dir, num_hidden=128, epochs=200,
                 f"val_loss={vl:.4f})")
 
     optim = t.optim.Adam(model.parameters(), lr=lr)
+
+    # AMP setup
+    if use_amp and device.type == 'cuda':
+        try:
+            bf16_ok = t.cuda.is_bf16_supported()
+        except AttributeError:
+            bf16_ok = False
+        if bf16_ok:
+            amp_dtype = t.bfloat16
+        else:
+            amp_dtype = t.float16
+        scaler = t.cuda.amp.GradScaler()
+        if verbose:
+            print(f"  AMP enabled (dtype={amp_dtype})")
+    else:
+        amp_dtype = None
+        scaler = None
+        if use_amp and verbose:
+            print("  AMP requested but CUDA unavailable.")
 
     steps_per_epoch = len(train_loader)
     if warmup_frac is not None:
@@ -186,24 +241,41 @@ def train(cache_dir, num_hidden=128, epochs=200,
              context_mask, target_mask) = batch
             global_step += 1
 
-            context_x = context_x.to(device)
-            context_y = context_y.to(device)
-            target_x = target_x.to(device)
-            target_y = target_y.to(device)
-            context_mask = context_mask.to(device)
-            target_mask = target_mask.to(device)
+            non_blocking = (device.type == 'cuda')
+            context_x = context_x.to(device, non_blocking=non_blocking)
+            context_y = context_y.to(device, non_blocking=non_blocking)
+            target_x = target_x.to(device, non_blocking=non_blocking)
+            target_y = target_y.to(device, non_blocking=non_blocking)
+            context_mask = context_mask.to(
+                device, non_blocking=non_blocking)
+            target_mask = target_mask.to(
+                device, non_blocking=non_blocking)
 
-            mu, sigma, kl, loss = model(
-                context_x, context_y,
-                target_x, target_y,
-                context_mask=context_mask,
-                target_mask=target_mask)
-
-            optim.zero_grad()
-            loss.backward()
-            t.nn.utils.clip_grad_norm_(
-                model.parameters(), max_norm=1.0)
-            optim.step()
+            if amp_dtype is not None:
+                with t.cuda.amp.autocast(
+                        dtype=amp_dtype):
+                    mu, sigma, kl, loss = model(
+                        context_x, context_y,
+                        target_x, target_y,
+                        context_mask=context_mask,
+                        target_mask=target_mask)
+                optim.zero_grad(set_to_none=True)
+                scaler.scale(loss).backward()
+                t.nn.utils.clip_grad_norm_(
+                    model.parameters(), max_norm=1.0)
+                scaler.step(optim)
+                scaler.update()
+            else:
+                mu, sigma, kl, loss = model(
+                    context_x, context_y,
+                    target_x, target_y,
+                    context_mask=context_mask,
+                    target_mask=target_mask)
+                optim.zero_grad(set_to_none=True)
+                loss.backward()
+                t.nn.utils.clip_grad_norm_(
+                    model.parameters(), max_norm=1.0)
+                optim.step()
             scheduler.step()
             ema.update(model)
 
@@ -231,24 +303,38 @@ def train(cache_dir, num_hidden=128, epochs=200,
         ema.apply_shadow(model)
         model.eval()
         val_loss_sum = 0.0
+        non_blocking = (device.type == 'cuda')
         with t.no_grad():
             for batch in val_loader:
                 (context_x, context_y,
                  target_x, target_y,
                  context_mask, target_mask) = batch
-                context_x = context_x.to(device)
-                context_y = context_y.to(device)
-                target_x = target_x.to(device)
-                target_y = target_y.to(device)
-                context_mask = (
-                    context_mask.to(device))
-                target_mask = (
-                    target_mask.to(device))
-                _, _, _, loss = model(
-                    context_x, context_y,
-                    target_x, target_y,
-                    context_mask=context_mask,
-                    target_mask=target_mask)
+                context_x = context_x.to(
+                    device, non_blocking=non_blocking)
+                context_y = context_y.to(
+                    device, non_blocking=non_blocking)
+                target_x = target_x.to(
+                    device, non_blocking=non_blocking)
+                target_y = target_y.to(
+                    device, non_blocking=non_blocking)
+                context_mask = context_mask.to(
+                    device, non_blocking=non_blocking)
+                target_mask = target_mask.to(
+                    device, non_blocking=non_blocking)
+                if amp_dtype is not None:
+                    with t.cuda.amp.autocast(
+                            dtype=amp_dtype):
+                        _, _, _, loss = model(
+                            context_x, context_y,
+                            target_x, target_y,
+                            context_mask=context_mask,
+                            target_mask=target_mask)
+                else:
+                    _, _, _, loss = model(
+                        context_x, context_y,
+                        target_x, target_y,
+                        context_mask=context_mask,
+                        target_mask=target_mask)
                 val_loss_sum += loss.item()
         ema.restore(model)
 
@@ -331,24 +417,38 @@ def train(cache_dir, num_hidden=128, epochs=200,
             model.load_state_dict(best_state_dict)
         model.eval()
         test_loss_sum = 0.0
+        non_blocking = (device.type == 'cuda')
         with t.no_grad():
             for batch in test_loader:
                 (context_x, context_y,
                  target_x, target_y,
                  context_mask, target_mask) = batch
-                context_x = context_x.to(device)
-                context_y = context_y.to(device)
-                target_x = target_x.to(device)
-                target_y = target_y.to(device)
-                context_mask = (
-                    context_mask.to(device))
-                target_mask = (
-                    target_mask.to(device))
-                _, _, _, loss = model(
-                    context_x, context_y,
-                    target_x, target_y,
-                    context_mask=context_mask,
-                    target_mask=target_mask)
+                context_x = context_x.to(
+                    device, non_blocking=non_blocking)
+                context_y = context_y.to(
+                    device, non_blocking=non_blocking)
+                target_x = target_x.to(
+                    device, non_blocking=non_blocking)
+                target_y = target_y.to(
+                    device, non_blocking=non_blocking)
+                context_mask = context_mask.to(
+                    device, non_blocking=non_blocking)
+                target_mask = target_mask.to(
+                    device, non_blocking=non_blocking)
+                if amp_dtype is not None:
+                    with t.cuda.amp.autocast(
+                            dtype=amp_dtype):
+                        _, _, _, loss = model(
+                            context_x, context_y,
+                            target_x, target_y,
+                            context_mask=context_mask,
+                            target_mask=target_mask)
+                else:
+                    _, _, _, loss = model(
+                        context_x, context_y,
+                        target_x, target_y,
+                        context_mask=context_mask,
+                        target_mask=target_mask)
                 test_loss_sum += loss.item()
         avg_test = (
             test_loss_sum / len(test_loader))

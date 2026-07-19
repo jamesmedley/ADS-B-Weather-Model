@@ -259,17 +259,21 @@ class WindSnapshotDataset(Dataset):
     def __getitem__(self, idx):
         self._ensure_loaded()
         start, end = self._ranges[idx]
-        x = torch.from_numpy(np.array(self._x[start:end], dtype=np.float32))
-        y = torch.from_numpy(np.array(self._y[start:end], dtype=np.float32))
+        x = torch.from_numpy(
+            self._x[start:end].copy().astype(np.float32))
+        y = torch.from_numpy(
+            self._y[start:end].copy().astype(np.float32))
         return x, y
 
 
 # --- Collate ---
 
-def _rotate_wind(y, angle_rad):
-    """Rotate the (sin, cos) wind-direction components by angle_rad."""
-    cos_a = math.cos(angle_rad)
-    sin_a = math.sin(angle_rad)
+def _rotate_wind(y, cos_a, sin_a):
+    """Rotate the (sin, cos) wind-direction components.
+
+    cos_a and sin_a can be scalars or tensors broadcastable
+    with y.
+    """
     y_rot = y.clone()
     s, c = y[..., 0], y[..., 1]
     y_rot[..., 0] = s * cos_a + c * sin_a
@@ -283,17 +287,24 @@ def collate_fn(batch, augment=True):
     augmentation. C is a random subset, T is the full snapshot (C ⊂ T).
     Zero-pads to batch max with bool masks.
     """
+    B_raw = len(batch)
+    if augment:
+        angles = torch.rand(B_raw) * (2 * math.pi)
+        cos_a = angles.cos()
+        sin_a = angles.sin()
+    else:
+        cos_a = sin_a = None
+
     context_xs, context_ys, target_xs, target_ys = [], [], [], []
     ctx_lens, tgt_lens = [], []
 
-    for (x, y) in batch:
+    for i, (x, y) in enumerate(batch):
         n = x.size(0)
         if n < 2:
             continue
 
         if augment:
-            angle = np.random.uniform(0, 2 * math.pi)
-            y = _rotate_wind(y, angle)
+            y = _rotate_wind(y, cos_a[i], sin_a[i])
 
         n_ctx = int(n * np.random.uniform(0.25, 0.75))
         n_ctx = max(1, min(n_ctx, n - 1))
