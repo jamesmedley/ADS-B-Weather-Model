@@ -99,7 +99,9 @@ def load_model(checkpoint_path, device,
     """Reconstruct LatentModel from checkpoint.
     Recent checkpoints carry hparams.
     """
-    ckpt = t.load(checkpoint_path, map_location=device)
+    ckpt = t.load(
+        checkpoint_path, map_location=device,
+        weights_only=False)
     hp = ckpt.get('hparams', {})
 
     num_hidden = num_hidden if num_hidden is not None else hp.get('num_hidden')

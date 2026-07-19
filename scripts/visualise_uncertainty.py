@@ -44,7 +44,9 @@ from wind_map.utils import (
 
 def load_model(checkpoint_path, num_hidden, num_layers, device):
     model = LatentModel(num_hidden, num_layers=num_layers).to(device)
-    ckpt = torch.load(checkpoint_path, map_location=device)
+    ckpt = torch.load(
+        checkpoint_path, map_location=device,
+        weights_only=False)
     model.load_state_dict(ckpt['model'])
     model.eval()
     print(f"Loaded checkpoint from epoch {ckpt.get('epoch', '?')} "

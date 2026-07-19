@@ -6,6 +6,9 @@ import os
 import copy
 
 import torch as t
+from torch.optim.lr_scheduler import (
+    SequentialLR, LinearLR, CosineAnnealingWarmRestarts,
+)
 from tqdm import tqdm
 
 from wind_map.network import LatentModel
@@ -16,14 +19,35 @@ from wind_map.preprocess import (
 from torch.utils.data import DataLoader
 
 
-def adjust_learning_rate(optimizer, step_num,
-                         warmup_step=4000, base_lr=1e-3):
-    """Noam warmup schedule — overwrites optimizer LR."""
-    lr = base_lr * warmup_step ** 0.5 * min(
-        step_num * warmup_step ** -1.5,
-        step_num ** -0.5)
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
+class EMA:
+    """Exponential moving average of model parameters."""
+
+    def __init__(self, model, decay=0.999):
+        self.decay = decay
+        self.shadow = {
+            name: param.clone().detach()
+            for name, param in model.named_parameters()
+        }
+
+    @t.no_grad()
+    def update(self, model):
+        for name, param in model.named_parameters():
+            self.shadow[name].mul_(self.decay).add_(
+                param.data, alpha=1 - self.decay
+            )
+
+    def apply_shadow(self, model):
+        self.backup = {
+            name: param.clone()
+            for name, param in model.named_parameters()
+        }
+        for name, param in model.named_parameters():
+            param.data.copy_(self.shadow[name])
+
+    def restore(self, model):
+        for name, param in model.named_parameters():
+            param.data.copy_(self.backup[name])
+        del self.backup
 
 
 def train(cache_dir, num_hidden=128, epochs=200,
@@ -34,7 +58,8 @@ def train(cache_dir, num_hidden=128, epochs=200,
           warmup_frac=None,
           checkpoint_dir='./checkpoint',
           save_checkpoint=True,
-          run_test_eval=True, verbose=True, patience=50):
+          run_test_eval=True, verbose=True, patience=50,
+          ema_decay=0.999):
     """
     Train the Wind ANP.
 
@@ -49,8 +74,10 @@ def train(cache_dir, num_hidden=128, epochs=200,
     """
     device = t.device(
         'cuda' if t.cuda.is_available() else 'cpu')
+    use_amp = device.type == 'cuda'
     if verbose:
-        print(f"Training on {device}")
+        amp_msg = " + AMP" if use_amp else ""
+        print(f"Training on {device}{amp_msg}")
 
     # --- Data ---
     train_ids, val_ids, test_ids = day_grouped_split(
@@ -92,7 +119,8 @@ def train(cache_dir, num_hidden=128, epochs=200,
                 f"Loading pretrained weights from "
                 f"{init_checkpoint} ...")
         pre_ckpt = t.load(
-            init_checkpoint, map_location=device)
+            init_checkpoint, map_location=device,
+            weights_only=False)
         model.load_state_dict(pre_ckpt['model'])
         if verbose:
             ep = pre_ckpt['epoch']
@@ -107,14 +135,30 @@ def train(cache_dir, num_hidden=128, epochs=200,
     if warmup_frac is not None:
         warmup_steps = max(
             1, int(warmup_frac * epochs * steps_per_epoch))
+
+    # --- LR schedule: warmup + cosine annealing ---
+    warmup_sched = LinearLR(
+        optim, start_factor=1e-3, total_iters=warmup_steps)
+    cosine_T0 = steps_per_epoch * 20
+    cosine_sched = CosineAnnealingWarmRestarts(
+        optim, T_0=cosine_T0, T_mult=2, eta_min=lr * 0.01)
+    scheduler = SequentialLR(
+        optim, [warmup_sched, cosine_sched],
+        milestones=[warmup_steps])
+
     if verbose:
         total_steps = epochs * steps_per_epoch
         pct = 100 * warmup_steps / max(total_steps, 1)
         print(
-            f"  LR warmup: {warmup_steps} steps "
-            f"({steps_per_epoch} steps/epoch, "
-            f"{total_steps} total, "
-            f"warmup covers {pct:.1f}%)")
+            f"  LR: warmup {warmup_steps} steps "
+            f"({pct:.1f}%), then cosine restarts "
+            f"(T_0={cosine_T0})")
+
+    # --- EMA ---
+    ema = EMA(model, decay=ema_decay)
+
+    # --- AMP scaler ---
+    scaler = t.amp.GradScaler(device.type)
 
     global_step = 0
     best_val_loss = float('inf')
@@ -146,9 +190,6 @@ def train(cache_dir, num_hidden=128, epochs=200,
             (context_x, context_y, target_x, target_y,
              context_mask, target_mask) = batch
             global_step += 1
-            adjust_learning_rate(
-                optim, global_step,
-                warmup_step=warmup_steps, base_lr=lr)
 
             context_x = context_x.to(device)
             context_y = context_y.to(device)
@@ -157,17 +198,22 @@ def train(cache_dir, num_hidden=128, epochs=200,
             context_mask = context_mask.to(device)
             target_mask = target_mask.to(device)
 
-            mu, sigma, kl, loss = model(
-                context_x, context_y,
-                target_x, target_y,
-                context_mask=context_mask,
-                target_mask=target_mask)
+            with t.amp.autocast(device.type, enabled=use_amp):
+                mu, sigma, kl, loss = model(
+                    context_x, context_y,
+                    target_x, target_y,
+                    context_mask=context_mask,
+                    target_mask=target_mask)
 
             optim.zero_grad()
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optim)
             t.nn.utils.clip_grad_norm_(
                 model.parameters(), max_norm=1.0)
-            optim.step()
+            scaler.step(optim)
+            scaler.update()
+            scheduler.step()
+            ema.update(model)
 
             train_loss_sum += loss.item()
             running_loss += loss.detach()
@@ -189,7 +235,8 @@ def train(cache_dir, num_hidden=128, epochs=200,
 
         avg_train = train_loss_sum / len(train_loader)
 
-        # Validate
+        # Validate (using EMA weights)
+        ema.apply_shadow(model)
         model.eval()
         val_loss_sum = 0.0
         with t.no_grad():
@@ -205,12 +252,15 @@ def train(cache_dir, num_hidden=128, epochs=200,
                     context_mask.to(device))
                 target_mask = (
                     target_mask.to(device))
-                _, _, _, loss = model(
-                    context_x, context_y,
-                    target_x, target_y,
-                    context_mask=context_mask,
-                    target_mask=target_mask)
+                with t.amp.autocast(
+                        device.type, enabled=use_amp):
+                    _, _, _, loss = model(
+                        context_x, context_y,
+                        target_x, target_y,
+                        context_mask=context_mask,
+                        target_mask=target_mask)
                 val_loss_sum += loss.item()
+        ema.restore(model)
 
         avg_val = val_loss_sum / len(val_loader)
         if verbose:
@@ -225,10 +275,13 @@ def train(cache_dir, num_hidden=128, epochs=200,
             epochs_since_improvement = 0
 
             if save_checkpoint:
+                # Save with EMA weights
+                ema.apply_shadow(model)
                 ckpt = {
                     'epoch': epoch,
                     'model': model.state_dict(),
                     'optimizer': optim.state_dict(),
+                    'scheduler': scheduler.state_dict(),
                     'val_loss': avg_val,
                     'hparams': {
                         'num_hidden': num_hidden,
@@ -237,17 +290,21 @@ def train(cache_dir, num_hidden=128, epochs=200,
                         'dropout': dropout,
                         'lr': lr,
                         'batch_size': batch_size,
+                        'ema_decay': ema_decay,
                     },
                 }
                 t.save(ckpt, best_ckpt_path)
+                ema.restore(model)
                 if verbose:
                     bvl = best_val_loss
                     print(
                         f"  New best "
                         f"val_loss={bvl:.4f} saved.")
             else:
+                ema.apply_shadow(model)
                 best_state_dict = (
                     copy.deepcopy(model.state_dict()))
+                ema.restore(model)
         else:
             epochs_since_improvement += 1
             if (patience is not None
@@ -276,8 +333,8 @@ def train(cache_dir, num_hidden=128, epochs=200,
                 "held-out test set...")
         if save_checkpoint:
             best_ckpt = t.load(
-                best_ckpt_path,
-                map_location=device)
+                best_ckpt_path, map_location=device,
+                weights_only=False)
             model.load_state_dict(
                 best_ckpt['model'])
         elif best_state_dict is not None:
@@ -297,11 +354,13 @@ def train(cache_dir, num_hidden=128, epochs=200,
                     context_mask.to(device))
                 target_mask = (
                     target_mask.to(device))
-                _, _, _, loss = model(
-                    context_x, context_y,
-                    target_x, target_y,
-                    context_mask=context_mask,
-                    target_mask=target_mask)
+                with t.amp.autocast(
+                        device.type, enabled=use_amp):
+                    _, _, _, loss = model(
+                        context_x, context_y,
+                        target_x, target_y,
+                        context_mask=context_mask,
+                        target_mask=target_mask)
                 test_loss_sum += loss.item()
         avg_test = (
             test_loss_sum / len(test_loader))

@@ -255,7 +255,7 @@ class LatentEncoder(nn.Module):
         hidden = F.relu(self.penultimate_layer(hidden))
         mu = self.mean_layer(hidden)
         log_sigma = self.std_layer(hidden)
-        sigma = 0.1 + 0.9 * torch.sigmoid(log_sigma)
+        sigma = 0.05 + F.softplus(log_sigma)
 
         return Normal(loc=mu, scale=sigma)
 
@@ -263,9 +263,17 @@ class LatentEncoder(nn.Module):
 class Decoder(nn.Module):
     """concat(representation, target_x) -> MLP -> mu, sigma"""
 
-    def __init__(self, x_size, representation_size, output_sizes):
+    def __init__(self, x_size, representation_size, output_sizes, dropout=0.0):
         super().__init__()
-        self.decoder_mlp = BatchMLP(x_size + representation_size, output_sizes)
+        layers = []
+        current = x_size + representation_size
+        for size in output_sizes[:-1]:
+            layers.append(nn.Linear(current, size))
+            layers.append(nn.ReLU())
+            layers.append(nn.Dropout(dropout))
+            current = size
+        layers.append(nn.Linear(current, output_sizes[-1]))
+        self.decoder_mlp = nn.Sequential(*layers)
 
     def forward(self, representation, target_x):
         hidden = torch.cat([representation, target_x], dim=-1)

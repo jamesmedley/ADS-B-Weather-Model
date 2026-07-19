@@ -67,7 +67,8 @@ class LatentModel(nn.Module):
             deterministic_encoder_output_sizes[-1] + num_latents
         )
         self.decoder = Decoder(
-            x_dim, representation_size, decoder_output_sizes
+            x_size, representation_size, decoder_output_sizes,
+            dropout=dropout
         )
 
     def forward(self, context_x, context_y, target_x, target_y=None,

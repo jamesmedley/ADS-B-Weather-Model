@@ -23,7 +23,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--hidden', type=int, default=256)
     parser.add_argument(
-        '--batch', type=int, default=142)
+        '--batch', type=int, default=150)
     parser.add_argument(
         '--workers', type=int, default=4)
     parser.add_argument(
@@ -46,8 +46,8 @@ if __name__ == '__main__':
         '--checkpoint-dir',
         default='./checkpoint')
     parser.add_argument(
-        '--patience', type=int, default=50,
-        help='Early stop patience (default: 50)')
+        '--patience', type=int, default=0,
+        help='Early stop patience (default: 0, no early stopping)')
     parser.add_argument(
         '--init_checkpoint', default=None,
         help='Optional pretrained checkpoint '
