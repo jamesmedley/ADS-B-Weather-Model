@@ -26,8 +26,8 @@ CENTRE_LAT = 51.071066
 CENTRE_LON = -1.042441
 
 MAX_ALT_FT = 50_000.0
-WIND_SPEED_MEAN = 35.08990871088307  # computed by convert_db.py
-WIND_SPEED_STD = 23.082372317152036    # computed by convert_db.py
+WIND_SPEED_MEAN = 34.95125809377175  # computed by convert_db.py
+WIND_SPEED_STD = 21.849448514436578  # computed by convert_db.py
 MIN_AIRCRAFT = 2
 
 # Half-width of the service area in degrees (~70km radius)
