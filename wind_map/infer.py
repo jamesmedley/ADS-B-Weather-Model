@@ -145,49 +145,45 @@ class WindPredictor:
         """
         Predict wind at query_points given context observations.
 
-        For each of n_samples z-draws from the prior, samples
-        y ~ Normal(mu(z), sigma(z)) to capture both epistemic
-        and aleatoric uncertainty in the prediction spread.
+        For each of n_samples latent z-draws from the prior, computes
+        mu(z) and sigma(z). The predictive mean is E[mu(z)] over draws.
+        Total uncertainty (sqrt(Var(mu) + E[sigma^2])) combines epistemic
+        and aleatoric components analytically — no MC sampling noise.
         """
         context_x, context_y = self._obs_to_tensors(context_observations)
         target_x = self._queries_to_tensor(query_points)
 
         mu_samples, sigma_samples = [], []
-        pred_dirs, pred_speeds = [], []
         for _ in range(n_samples):
             mu, sigma, _, _ = self.model(
                 context_x, context_y, target_x,
                 target_y=None
             )
-            mu_np = mu.squeeze(0).cpu().numpy()
-            sigma_np = sigma.squeeze(0).cpu().numpy()
-            mu_samples.append(mu_np)
-            sigma_samples.append(sigma_np)
-
-            # Sample from predictive distribution
-            noise = np.random.randn(*mu_np.shape).astype(np.float32)
-            y_sample = mu_np + sigma_np * noise
-            sin_s = y_sample[..., 0]
-            cos_s = y_sample[..., 1]
-            spd_s = np.clip(y_sample[..., 2], 0, None)
-            pred_dirs.append(np.degrees(np.arctan2(sin_s, cos_s)) % 360)
-            pred_speeds.append(spd_s * WIND_SPEED_STD + WIND_SPEED_MEAN)
+            mu_samples.append(mu.squeeze(0).cpu().numpy())
+            sigma_samples.append(sigma.squeeze(0).cpu().numpy())
 
         mu_stack = np.stack(mu_samples, axis=0)
         sigma_stack = np.stack(sigma_samples, axis=0)
-        pred_dir_stack = np.stack(pred_dirs, axis=0)
-        pred_spd_stack = np.stack(pred_speeds, axis=0)
 
-        # Main predictions from sampled y's
-        mean_dirs = circular_mean(pred_dir_stack, axis=0)
-        mean_speeds = pred_spd_stack.mean(axis=0)
+        # Mean predictions from mu across z-draws (no aleatoric noise)
+        sin_mu = mu_stack[..., 0]
+        cos_mu = mu_stack[..., 1]
+        spd_mu = mu_stack[..., 2]
+        mu_dirs = np.degrees(np.arctan2(sin_mu, cos_mu)) % 360
+        mu_speeds = np.clip(spd_mu, 0, None) * WIND_SPEED_STD + WIND_SPEED_MEAN
+        mean_dirs = circular_mean(mu_dirs, axis=0)
+        mean_speeds = mu_speeds.mean(axis=0)
 
-        # Total uncertainty: spread of y-samples
-        total_dir_std = circular_std(pred_dir_stack, axis=0)
-        total_speed_std = pred_spd_stack.std(axis=0, ddof=1)
-
-        # Epistemic & aleatoric via shared function
+        # Epistemic & aleatoric components
         components = compute_uncertainty_components(mu_stack, sigma_stack)
+
+        # Total uncertainty: sqrt(Var(mu) + E[sigma^2]) — analytic, no MC noise
+        total_dir_std = np.sqrt(
+            components['epistemic_dir_std']**2
+            + components['aleatoric_dir_std']**2)
+        total_speed_std = np.sqrt(
+            components['epistemic_speed_std']**2
+            + components['aleatoric_speed_std']**2)
 
         return {
             'wind_dir_deg': mean_dirs,

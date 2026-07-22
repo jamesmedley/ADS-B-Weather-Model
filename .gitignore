@@ -11,3 +11,4 @@ outputs/runs/
 note.txt
 best_hyperparameters.txt
 hp_optim_results.pkl
+diagnose.py
