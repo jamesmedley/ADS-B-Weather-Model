@@ -24,64 +24,29 @@ Usage:
 
 import argparse
 import json
-import math
 
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
-from wind_map.network import LatentModel
+from wind_map.infer import (
+    load_model_checkpoint, observations_to_tensors,
+    queries_to_tensor, compute_uncertainty_components,
+)
 from wind_map.preprocess import (
-    normalise_coords, WIND_SPEED_MEAN, WIND_SPEED_STD, day_grouped_split
+    WIND_SPEED_MEAN, WIND_SPEED_STD, day_grouped_split
 )
 from wind_map.utils import (
-    circular_mean, circular_std, pick_snapshot,
+    circular_mean, pick_snapshot,
     make_grid, wind_to_uv, load_snapshot
 )
 
 
 # --- Model + tensor plumbing ---
 
-def load_model(checkpoint_path, num_hidden, num_layers, device):
-    ckpt = torch.load(
-        checkpoint_path, map_location=device,
-        weights_only=False)
-    hp = ckpt.get('hparams', {})
-    num_hidden = num_hidden or hp.get('num_hidden', 128)
-    num_layers = num_layers or hp.get('num_layers', 4)
-    dropout = hp.get('dropout', 0.0)
-    model = LatentModel(num_hidden, num_layers=num_layers,
-                        dropout=dropout).to(device)
-    model.load_state_dict(ckpt['model'])
-    model.eval()
-    print(f"Loaded checkpoint from epoch {ckpt.get('epoch', '?')} "
-          f"(val_loss={ckpt.get('val_loss', float('nan')):.4f})")
-    return model
-
-
-def obs_to_tensors(observations, device):
-    xs, ys = [], []
-    for obs in observations:
-        lat_n, lon_n, alt_n = normalise_coords(
-            obs['lat'], obs['lon'], obs['alt_ft'])
-        rad = math.radians(obs['wind_dir'])
-        xs.append([lat_n, lon_n, alt_n])
-        ys.append([
-            math.sin(rad), math.cos(rad),
-            (obs['wind_speed'] - WIND_SPEED_MEAN) / WIND_SPEED_STD])
-    x = torch.FloatTensor(xs).unsqueeze(0).to(device)
-    y = torch.FloatTensor(ys).unsqueeze(0).to(device)
-    return x, y
-
-
-def queries_to_tensor(queries, device):
-    xs = [normalise_coords(q['lat'], q['lon'], q['alt_ft']) for q in queries]
-    return torch.FloatTensor(xs).unsqueeze(0).to(device)
-
-
 @torch.no_grad()
 def predict_components(model, context, queries, n_samples, device):
-    context_x, context_y = obs_to_tensors(context, device)
+    context_x, context_y = observations_to_tensors(context, device)
     target_x = queries_to_tensor(queries, device)
 
     mu_samples, sigma_samples = [], []
@@ -103,31 +68,12 @@ def predict_components(model, context, queries, n_samples, device):
     mean_dirs = circular_mean(sample_dirs, axis=0)
     mean_speeds = sample_speeds.mean(axis=0)
 
-    # Epistemic: spread of mu(z) across z-draws
-    epistemic_dir_std = circular_std(sample_dirs, axis=0)
-    epistemic_speed_std = sample_speeds.std(axis=0, ddof=1)
-
-    # Aleatoric: delta-method propagation of sigma
-    sin_sig = sigma_stack[..., 0]
-    cos_sig = sigma_stack[..., 1]
-    spd_sig = sigma_stack[..., 2]
-    R2 = sin_mu ** 2 + cos_mu ** 2 + 1e-6
-    aleatoric_dir_var_rad2 = (
-        (cos_mu / R2) ** 2 * sin_sig ** 2
-        + (sin_mu / R2) ** 2 * cos_sig ** 2)
-    aleatoric_dir_var_deg2 = np.degrees(np.sqrt(aleatoric_dir_var_rad2)) ** 2
-    aleatoric_dir_std = np.sqrt(aleatoric_dir_var_deg2.mean(axis=0))
-
-    aleatoric_speed_var = (spd_sig * WIND_SPEED_STD) ** 2
-    aleatoric_speed_std = np.sqrt(aleatoric_speed_var.mean(axis=0))
+    components = compute_uncertainty_components(mu_stack, sigma_stack)
 
     return {
         'wind_dir_deg': mean_dirs,
         'wind_speed_kt': mean_speeds,
-        'aleatoric_dir_std': aleatoric_dir_std,
-        'aleatoric_speed_std': aleatoric_speed_std,
-        'epistemic_dir_std': epistemic_dir_std,
-        'epistemic_speed_std': epistemic_speed_std,
+        **components,
     }
 
 
@@ -285,7 +231,8 @@ if __name__ == "__main__":
         p.error("--average requires --cache")
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = load_model(args.checkpoint, args.hidden, args.num_layers, device)
+    model, ckpt = load_model_checkpoint(
+        args.checkpoint, device, args.hidden, args.num_layers)
 
     if args.average:
         print(f"Averaging over '{args.split}' split...")

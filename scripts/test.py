@@ -20,9 +20,10 @@ import numpy as np
 import torch as t
 from torch.utils.data import DataLoader
 
-from wind_map.network import LatentModel
+from wind_map.infer import load_model_checkpoint
 from wind_map.preprocess import (
-    WindSnapshotDataset, day_grouped_split, WIND_SPEED_MEAN, WIND_SPEED_STD
+    WindSnapshotDataset, day_grouped_split, pad_batch,
+    WIND_SPEED_MEAN, WIND_SPEED_STD,
 )
 
 
@@ -62,69 +63,14 @@ def eval_collate_fn(batch, context_frac=0.5):
             " observations to split."
         )
 
-    B = len(context_xs)
-    max_ctx = max(ctx_lens)
-    max_tgt = max(tgt_lens)
-    x_dim = context_xs[0].size(-1)
-    y_dim = context_ys[0].size(-1)
-
-    context_x = context_xs[0].new_zeros(B, max_ctx, x_dim)
-    context_y = context_ys[0].new_zeros(B, max_ctx, y_dim)
-    target_x = target_xs[0].new_zeros(B, max_tgt, x_dim)
-    target_y = target_ys[0].new_zeros(B, max_tgt, y_dim)
-    context_mask = t.zeros(B, max_ctx, dtype=t.bool)
-    target_mask = t.zeros(B, max_tgt, dtype=t.bool)
-
-    for i in range(B):
-        nc, nt = ctx_lens[i], tgt_lens[i]
-        context_x[i, :nc] = context_xs[i]
-        context_y[i, :nc] = context_ys[i]
-        target_x[i, :nt] = target_xs[i]
-        target_y[i, :nt] = target_ys[i]
-        context_mask[i, :nc] = True
-        target_mask[i, :nt] = True
-
-    return context_x, context_y, target_x, target_y, context_mask, target_mask
+    return pad_batch(
+        context_xs, context_ys, target_xs, target_ys, ctx_lens, tgt_lens)
 
 
 def _circular_abs_diff_deg(a, b):
     """Elementwise circular |a - b| in degrees, result in [0, 180]."""
     d = np.abs(a - b) % 360
     return np.minimum(d, 360 - d)
-
-
-def load_model(checkpoint_path, device,
-               num_hidden=None, num_layers=None,
-               dropout=None):
-    """Reconstruct LatentModel from checkpoint.
-    Recent checkpoints carry hparams.
-    """
-    ckpt = t.load(
-        checkpoint_path, map_location=device,
-        weights_only=False)
-    hp = ckpt.get('hparams', {})
-
-    num_hidden = num_hidden if num_hidden is not None else hp.get('num_hidden')
-    num_layers = (
-        num_layers if num_layers is not None
-        else hp.get('num_layers', 4)
-    )
-    dropout = dropout if dropout is not None else hp.get('dropout', 0.0)
-
-    if num_hidden is None:
-        raise ValueError(
-            "No 'hparams' in checkpoint"
-            " — pass --hidden explicitly."
-        )
-
-    model = LatentModel(
-        num_hidden, x_dim=3, y_dim=3,
-        num_layers=num_layers,
-        dropout=dropout,
-    ).to(device)
-    model.load_state_dict(ckpt['model'])
-    model.eval()
-    return model, ckpt
 
 
 @t.no_grad()
@@ -141,8 +87,8 @@ def evaluate(checkpoint_path, cache_dir, split='test', num_hidden=None,
     else:
         device = t.device(device)
 
-    model, ckpt = load_model(checkpoint_path, device, num_hidden, num_layers,
-                             dropout)
+    model, ckpt = load_model_checkpoint(checkpoint_path, device, num_hidden,
+                                        num_layers, dropout)
 
     train_ids, val_ids, test_ids = day_grouped_split(
         cache_dir, seed=split_seed

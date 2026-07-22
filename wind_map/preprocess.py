@@ -69,29 +69,37 @@ def decode_wind(sin_val, cos_val, speed_norm):
 
 # --- Day-grouped train/val/test split ---
 
-def _parse_snapshot_date(time_str):
-    """Parse a snapshot_time string to a calendar date.
+def _parse_datetime(time_str):
+    """Parse a snapshot_time string to a datetime.
 
-    Handles ISO strings and epoch seconds.
+    Handles ISO strings and epoch seconds. Returns UTC datetime.
     """
     s = str(time_str).strip()
 
     try:
         epoch = float(s)
-        return datetime.utcfromtimestamp(epoch).date()
+        return datetime.utcfromtimestamp(epoch)
     except ValueError:
         pass
 
     iso = s.replace('T', ' ')
     try:
-        return datetime.fromisoformat(iso).date()
+        return datetime.fromisoformat(iso)
     except ValueError:
         pass
 
     try:
-        return datetime.strptime(iso[:10], '%Y-%m-%d').date()
+        return datetime.strptime(iso[:10], '%Y-%m-%d')
     except ValueError as e:
         raise ValueError(f"Could not parse snapshot_time {time_str!r}") from e
+
+
+def _parse_snapshot_date(time_str):
+    """Parse a snapshot_time string to a calendar date.
+
+    Handles ISO strings and epoch seconds.
+    """
+    return _parse_datetime(time_str).date()
 
 
 def _closest_day_subset(day_sizes, target, rng):
@@ -281,6 +289,40 @@ def _rotate_wind(y, cos_a, sin_a):
     return y_rot
 
 
+def pad_batch(
+    context_xs, context_ys, target_xs, target_ys, ctx_lens, tgt_lens,
+):
+    """Zero-pad variable-length context/target lists to a single batch tensor
+    with boolean masks.
+
+    Returns (context_x, context_y, target_x, target_y,
+             context_mask, target_mask).
+    """
+    B = len(context_xs)
+    max_ctx = max(ctx_lens)
+    max_tgt = max(tgt_lens)
+    x_dim = context_xs[0].size(-1)
+    y_dim = context_ys[0].size(-1)
+
+    context_x = context_xs[0].new_zeros(B, max_ctx, x_dim)
+    context_y = context_ys[0].new_zeros(B, max_ctx, y_dim)
+    target_x = target_xs[0].new_zeros(B, max_tgt, x_dim)
+    target_y = target_ys[0].new_zeros(B, max_tgt, y_dim)
+    context_mask = torch.zeros(B, max_ctx, dtype=torch.bool)
+    target_mask = torch.zeros(B, max_tgt, dtype=torch.bool)
+
+    for i in range(B):
+        nc, nt = ctx_lens[i], tgt_lens[i]
+        context_x[i, :nc] = context_xs[i]
+        context_y[i, :nc] = context_ys[i]
+        target_x[i, :nt] = target_xs[i]
+        target_y[i, :nt] = target_ys[i]
+        context_mask[i, :nc] = True
+        target_mask[i, :nt] = True
+
+    return context_x, context_y, target_x, target_y, context_mask, target_mask
+
+
 def collate_fn(batch, augment=True):
     """
     Split each snapshot into context / target, with optional wind-direction
@@ -324,29 +366,8 @@ def collate_fn(batch, augment=True):
         raise RuntimeError(
             "Empty batch — every item had < 2 valid wind observations.")
 
-    B = len(context_xs)
-    max_ctx = max(ctx_lens)
-    max_tgt = max(tgt_lens)
-    x_dim = context_xs[0].size(-1)
-    y_dim = context_ys[0].size(-1)
-
-    context_x = context_xs[0].new_zeros(B, max_ctx, x_dim)
-    context_y = context_ys[0].new_zeros(B, max_ctx, y_dim)
-    target_x = target_xs[0].new_zeros(B, max_tgt, x_dim)
-    target_y = target_ys[0].new_zeros(B, max_tgt, y_dim)
-    context_mask = torch.zeros(B, max_ctx, dtype=torch.bool)
-    target_mask = torch.zeros(B, max_tgt, dtype=torch.bool)
-
-    for i in range(B):
-        nc, nt = ctx_lens[i], tgt_lens[i]
-        context_x[i, :nc] = context_xs[i]
-        context_y[i, :nc] = context_ys[i]
-        target_x[i, :nt] = target_xs[i]
-        target_y[i, :nt] = target_ys[i]
-        context_mask[i, :nc] = True
-        target_mask[i, :nt] = True
-
-    return context_x, context_y, target_x, target_y, context_mask, target_mask
+    return pad_batch(
+        context_xs, context_ys, target_xs, target_ys, ctx_lens, tgt_lens)
 
 
 def _worker_init(worker_id):

@@ -5,6 +5,7 @@ wind_map.train — Training loop for the Wind ANP.
 import os
 import copy
 import threading
+from contextlib import nullcontext
 
 import torch as t
 from torch.optim.lr_scheduler import (
@@ -90,7 +91,7 @@ def _save_checkpoint(path, ckpt):
 
 def train(cache_dir, num_hidden=128, epochs=200,
           batch_size=16, num_workers=4,
-           num_layers=4, dropout=0.0,
+          num_layers=4, dropout=0.0,
           init_checkpoint=None,
           split_seed=42, lr=1e-3, warmup_steps=4000,
           warmup_frac=None, kl_warmup_steps=2000,
@@ -247,49 +248,37 @@ def train(cache_dir, num_hidden=128, epochs=200,
             train_loader, desc=desc,
             disable=not verbose)
 
+        non_blocking = (device.type == 'cuda')
+
         for batch in pbar:
             (context_x, context_y, target_x, target_y,
-             context_mask, target_mask) = batch
+             context_mask, target_mask) = [
+                x.to(device, non_blocking=non_blocking) for x in batch
+            ]
             global_step += 1
-
-            non_blocking = (device.type == 'cuda')
-            context_x = context_x.to(device, non_blocking=non_blocking)
-            context_y = context_y.to(device, non_blocking=non_blocking)
-            target_x = target_x.to(device, non_blocking=non_blocking)
-            target_y = target_y.to(device, non_blocking=non_blocking)
-            context_mask = context_mask.to(
-                device, non_blocking=non_blocking)
-            target_mask = target_mask.to(
-                device, non_blocking=non_blocking)
 
             kl_weight = min(1.0, global_step / max(kl_warmup_steps, 1))
 
-            if amp_dtype is not None:
-                with t.cuda.amp.autocast(
-                        dtype=amp_dtype):
-                    mu, sigma, kl, loss = model(
-                        context_x, context_y,
-                        target_x, target_y,
-                        context_mask=context_mask,
-                        target_mask=target_mask,
-                        kl_weight=kl_weight)
-                optim.zero_grad(set_to_none=True)
-                scaler.scale(loss).backward()
-                t.nn.utils.clip_grad_norm_(
-                    model.parameters(), max_norm=1.0)
-                scaler.step(optim)
-                scaler.update()
-            else:
+            with (t.cuda.amp.autocast(dtype=amp_dtype)
+                  if amp_dtype is not None else nullcontext()):
                 mu, sigma, kl, loss = model(
                     context_x, context_y,
                     target_x, target_y,
                     context_mask=context_mask,
                     target_mask=target_mask,
                     kl_weight=kl_weight)
-                optim.zero_grad(set_to_none=True)
+
+            optim.zero_grad(set_to_none=True)
+            if scaler is not None:
+                scaler.scale(loss).backward()
+            else:
                 loss.backward()
-                t.nn.utils.clip_grad_norm_(
-                    model.parameters(), max_norm=1.0)
+            t.nn.utils.clip_grad_norm_(
+                model.parameters(), max_norm=1.0)
+            if scaler is not None:
+                scaler.step(optim)
+                scaler.update()
+            else:
                 optim.step()
             scheduler.step()
             ema.update(model)
@@ -318,33 +307,15 @@ def train(cache_dir, num_hidden=128, epochs=200,
         ema.apply_shadow(model)
         model.eval()
         val_loss_sum = 0.0
-        non_blocking = (device.type == 'cuda')
         with t.no_grad():
             for batch in val_loader:
                 (context_x, context_y,
                  target_x, target_y,
-                 context_mask, target_mask) = batch
-                context_x = context_x.to(
-                    device, non_blocking=non_blocking)
-                context_y = context_y.to(
-                    device, non_blocking=non_blocking)
-                target_x = target_x.to(
-                    device, non_blocking=non_blocking)
-                target_y = target_y.to(
-                    device, non_blocking=non_blocking)
-                context_mask = context_mask.to(
-                    device, non_blocking=non_blocking)
-                target_mask = target_mask.to(
-                    device, non_blocking=non_blocking)
-                if amp_dtype is not None:
-                    with t.cuda.amp.autocast(
-                            dtype=amp_dtype):
-                        _, _, _, loss = model(
-                            context_x, context_y,
-                            target_x, target_y,
-                            context_mask=context_mask,
-                            target_mask=target_mask)
-                else:
+                 context_mask, target_mask) = [
+                    x.to(device, non_blocking=non_blocking) for x in batch
+                ]
+                with (t.cuda.amp.autocast(dtype=amp_dtype)
+                      if amp_dtype is not None else nullcontext()):
                     _, _, _, loss = model(
                         context_x, context_y,
                         target_x, target_y,
@@ -450,28 +421,11 @@ def train(cache_dir, num_hidden=128, epochs=200,
             for batch in test_loader:
                 (context_x, context_y,
                  target_x, target_y,
-                 context_mask, target_mask) = batch
-                context_x = context_x.to(
-                    device, non_blocking=non_blocking)
-                context_y = context_y.to(
-                    device, non_blocking=non_blocking)
-                target_x = target_x.to(
-                    device, non_blocking=non_blocking)
-                target_y = target_y.to(
-                    device, non_blocking=non_blocking)
-                context_mask = context_mask.to(
-                    device, non_blocking=non_blocking)
-                target_mask = target_mask.to(
-                    device, non_blocking=non_blocking)
-                if amp_dtype is not None:
-                    with t.cuda.amp.autocast(
-                            dtype=amp_dtype):
-                        _, _, _, loss = model(
-                            context_x, context_y,
-                            target_x, target_y,
-                            context_mask=context_mask,
-                            target_mask=target_mask)
-                else:
+                 context_mask, target_mask) = [
+                    x.to(device, non_blocking=non_blocking) for x in batch
+                ]
+                with (t.cuda.amp.autocast(dtype=amp_dtype)
+                      if amp_dtype is not None else nullcontext()):
                     _, _, _, loss = model(
                         context_x, context_y,
                         target_x, target_y,

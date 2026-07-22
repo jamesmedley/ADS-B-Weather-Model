@@ -52,12 +52,12 @@ class Attention(nn.Module):
         q = self.query(query).view(B, seq_q, H, hs).transpose(1, 2)
 
         scale = hs ** 0.5
-        attn = torch.einsum('bhmd,bhnd->bhmn', q, k) / scale
+        attn = torch.matmul(q, k.transpose(-2, -1)) / scale
         if mask is not None:
             attn = attn.masked_fill(~mask[:, None, None, :], float('-inf'))
         attn = torch.softmax(attn, dim=-1)
 
-        out = torch.einsum('bhmn,bhnd->bhmd', attn, v)
+        out = torch.matmul(attn, v)
         out = out.transpose(1, 2).reshape(B, seq_q, H * hs)
 
         result = torch.cat([residual, out], dim=-1)
@@ -115,7 +115,8 @@ class DeterministicEncoder(nn.Module):
 
 
 class LatentEncoder(nn.Module):
-    """concat(x,y) -> projection -> self-attention -> mean -> mu/log_sigma -> z"""
+    """concat(x,y) -> projection -> self-attention
+    -> mean -> mu/log_sigma -> z"""
 
     def __init__(self, num_hidden, num_latents, x_dim=3, y_dim=3,
                  num_heads=4, num_layers=4, dropout=0.0):

@@ -58,8 +58,8 @@ def make_objective(cache_dir, search_epochs,
 
         val_loss = train_result['best_val_loss']
         print(f"  val_loss={val_loss:.4f}  "
-              f"(lr={lr:.2e} hidden={hidden} batch={batch} layers={layers} "
-               f"dropout={dropout:.3f})")
+              f"(lr={lr:.2e} hidden={hidden} batch={batch} "
+              f"layers={layers} dropout={dropout:.3f})")
         return val_loss
 
     return objective

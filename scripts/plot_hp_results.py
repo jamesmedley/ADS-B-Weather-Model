@@ -1,13 +1,27 @@
 """
 plot_hp_results.py — Load hp search results from pickle and
 generate convergence/objective/evaluations plots.
+
+Usage:
+    python plot_hp_results.py [--results hp_optim_results.pkl]
 """
+
+import argparse
+import os
 
 import matplotlib.pyplot as plt
 from skopt import load
 from skopt.plots import plot_convergence, plot_objective, plot_evaluations
 
-result = load("hp_optim_results.pkl")
+parser = argparse.ArgumentParser(
+    description='Plot hyperparameter search results.')
+parser.add_argument('--results', default='hp_optim_results.pkl',
+                    help='Path to hp search results pickle')
+parser.add_argument('--out-dir', default='outputs/imgs',
+                    help='Output directory for plots')
+args = parser.parse_args()
+
+result = load(args.results)
 
 best_hyperparameters = {
     "Learning Rate": result.x[0],
@@ -22,7 +36,7 @@ print("Best Hyperparameters:")
 for param, value in best_hyperparameters.items():
     print(f"{param}: {value}")
 
-with open('best_hyperparameters.txt', 'w') as f:
+with open(os.path.join(args.out_dir, 'best_hyperparameters.txt'), 'w') as f:
     f.write("Best Hyperparameters:\n")
     for param, value in best_hyperparameters.items():
         f.write(f"{param}: {value}\n")
@@ -39,15 +53,15 @@ plt.ylabel("Min f(x) after n calls", fontsize=16)
 plt.xticks(fontsize=14)
 plt.yticks(fontsize=14)
 plt.title("Convergence Plot", fontsize=20)
-plt.savefig('outputs/imgs/convergence_plot.png', dpi=300)
+plt.savefig(os.path.join(args.out_dir, 'convergence_plot.png'), dpi=300)
 plt.close()
 
 plt.figure(figsize=(12, 8))
 plot_objective(result, dimensions=param_names, size=5, n_points=250, levels=30)
-plt.savefig('outputs/imgs/objective_plot.png', dpi=300)
+plt.savefig(os.path.join(args.out_dir, 'objective_plot.png'), dpi=300)
 plt.close()
 
 plt.figure(figsize=(25, 25))
 plot_evaluations(result, dimensions=param_names, size=5)
-plt.savefig('outputs/imgs/evaluations_plot.png', dpi=300)
+plt.savefig(os.path.join(args.out_dir, 'evaluations_plot.png'), dpi=300)
 plt.close()

@@ -6,11 +6,11 @@ and visualise_uncertainty.py to avoid duplication.
 """
 
 import random
-from datetime import datetime
 
 import numpy as np
 
 from wind_map.preprocess import (
+    _parse_datetime,
     CENTRE_LAT, CENTRE_LON, LAT_RANGE_DEG, LON_RANGE_DEG,
     MAX_ALT_FT, day_grouped_split, decode_wind, WindSnapshotDataset,
 )
@@ -19,18 +19,11 @@ from wind_map.preprocess import (
 def format_snapshot_time(time_str):
     if time_str is None:
         return None
-    s = str(time_str).strip()
     try:
-        epoch = float(s)
-        return datetime.fromtimestamp(epoch).strftime("%d/%m/%y %H:%M")
+        dt = _parse_datetime(time_str)
+        return dt.strftime("%d/%m/%y %H:%M")
     except ValueError:
-        pass
-    iso = s.replace('T', ' ')
-    try:
-        return datetime.fromisoformat(iso).strftime("%d/%m/%y %H:%M")
-    except ValueError:
-        pass
-    return s
+        return str(time_str).strip()
 
 
 def lonlat_to_mercator(lon, lat):
