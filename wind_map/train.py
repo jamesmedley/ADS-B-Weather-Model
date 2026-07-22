@@ -4,6 +4,7 @@ wind_map.train — Training loop for the Wind ANP.
 
 import os
 import copy
+import threading
 
 import torch as t
 from torch.optim.lr_scheduler import (
@@ -14,7 +15,7 @@ from tqdm import tqdm
 from wind_map.network import LatentModel
 from wind_map.preprocess import (
     WindSnapshotDataset, day_grouped_split,
-    collate_fn, collate_fn_val,
+    collate_fn, collate_fn_val, _worker_init,
 )
 from torch.utils.data import DataLoader
 
@@ -80,13 +81,20 @@ class EMA:
                 self._backup[off:off + sz].reshape(p.shape))
 
 
+def _save_checkpoint(path, ckpt):
+    """Write checkpoint to *path* via an atomic tmp file."""
+    tmp = path + '.tmp'
+    t.save(ckpt, tmp)
+    os.replace(tmp, path)
+
+
 def train(cache_dir, num_hidden=128, epochs=200,
           batch_size=16, num_workers=4,
-          num_layers=2, ffn_expansion=2, dropout=0.0,
+           num_layers=4, dropout=0.0,
           init_checkpoint=None,
           split_seed=42, lr=1e-3, warmup_steps=4000,
-          warmup_frac=None,
-          checkpoint_dir='./checkpoint',
+          warmup_frac=None, kl_warmup_steps=2000,
+          free_bits=0.001, checkpoint_dir='./checkpoint',
           save_checkpoint=True,
           run_test_eval=True, verbose=True, patience=50,
           ema_decay=0.999,
@@ -128,24 +136,27 @@ def train(cache_dir, num_hidden=128, epochs=200,
         train_ds, batch_size=batch_size, shuffle=True,
         collate_fn=collate_fn, num_workers=num_workers,
         persistent_workers=use_persistent_workers,
+        worker_init_fn=_worker_init,
         pin_memory=(device.type == 'cuda'))
     val_loader = DataLoader(
         val_ds, batch_size=batch_size, shuffle=False,
         collate_fn=collate_fn_val, num_workers=num_workers,
         persistent_workers=use_persistent_workers,
+        worker_init_fn=_worker_init,
         pin_memory=(device.type == 'cuda'))
     test_loader = DataLoader(
         test_ds, batch_size=batch_size, shuffle=False,
         collate_fn=collate_fn_val, num_workers=num_workers,
         persistent_workers=use_persistent_workers,
+        worker_init_fn=_worker_init,
         pin_memory=(device.type == 'cuda'))
 
     # --- Model ---
     model = LatentModel(
         num_hidden, x_dim=3, y_dim=3,
         num_layers=num_layers,
-        ffn_expansion=ffn_expansion,
-        dropout=dropout).to(device)
+        dropout=dropout,
+        free_bits=free_bits).to(device)
 
     if init_checkpoint is not None:
         if verbose:
@@ -251,6 +262,8 @@ def train(cache_dir, num_hidden=128, epochs=200,
             target_mask = target_mask.to(
                 device, non_blocking=non_blocking)
 
+            kl_weight = min(1.0, global_step / max(kl_warmup_steps, 1))
+
             if amp_dtype is not None:
                 with t.cuda.amp.autocast(
                         dtype=amp_dtype):
@@ -258,7 +271,8 @@ def train(cache_dir, num_hidden=128, epochs=200,
                         context_x, context_y,
                         target_x, target_y,
                         context_mask=context_mask,
-                        target_mask=target_mask)
+                        target_mask=target_mask,
+                        kl_weight=kl_weight)
                 optim.zero_grad(set_to_none=True)
                 scaler.scale(loss).backward()
                 t.nn.utils.clip_grad_norm_(
@@ -270,7 +284,8 @@ def train(cache_dir, num_hidden=128, epochs=200,
                     context_x, context_y,
                     target_x, target_y,
                     context_mask=context_mask,
-                    target_mask=target_mask)
+                    target_mask=target_mask,
+                    kl_weight=kl_weight)
                 optim.zero_grad(set_to_none=True)
                 loss.backward()
                 t.nn.utils.clip_grad_norm_(
@@ -351,26 +366,39 @@ def train(cache_dir, num_hidden=128, epochs=200,
             epochs_since_improvement = 0
 
             if save_checkpoint:
-                # Save with EMA weights
+                # Build checkpoint on main thread (GPU work),
+                # then write to disk in a background thread so
+                # the GPU is not idle during the disk I/O.
                 ema.apply_shadow(model)
                 ckpt = {
                     'epoch': epoch,
-                    'model': model.state_dict(),
-                    'optimizer': optim.state_dict(),
+                    'model': {
+                        k: v.cpu()
+                        for k, v in model.state_dict().items()
+                    },
+                    'optimizer': {
+                        k: v.cpu() if isinstance(v, t.Tensor) else v
+                        for k, v in optim.state_dict().items()
+                    },
                     'scheduler': scheduler.state_dict(),
                     'val_loss': avg_val,
                     'hparams': {
                         'num_hidden': num_hidden,
                         'num_layers': num_layers,
-                        'ffn_expansion': ffn_expansion,
                         'dropout': dropout,
                         'lr': lr,
                         'batch_size': batch_size,
                         'ema_decay': ema_decay,
+                        'kl_warmup_steps': kl_warmup_steps,
+                        'free_bits': free_bits,
                     },
                 }
-                t.save(ckpt, best_ckpt_path)
                 ema.restore(model)
+                threading.Thread(
+                    target=_save_checkpoint,
+                    args=(best_ckpt_path, ckpt),
+                    daemon=True,
+                ).start()
                 if verbose:
                     bvl = best_val_loss
                     print(

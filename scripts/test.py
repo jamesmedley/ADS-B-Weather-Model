@@ -95,7 +95,7 @@ def _circular_abs_diff_deg(a, b):
 
 def load_model(checkpoint_path, device,
                num_hidden=None, num_layers=None,
-               ffn_expansion=None, dropout=None):
+               dropout=None):
     """Reconstruct LatentModel from checkpoint.
     Recent checkpoints carry hparams.
     """
@@ -107,11 +107,7 @@ def load_model(checkpoint_path, device,
     num_hidden = num_hidden if num_hidden is not None else hp.get('num_hidden')
     num_layers = (
         num_layers if num_layers is not None
-        else hp.get('num_layers', 2)
-    )
-    ffn_expansion = (
-        ffn_expansion if ffn_expansion is not None
-        else hp.get('ffn_expansion', 2)
+        else hp.get('num_layers', 4)
     )
     dropout = dropout if dropout is not None else hp.get('dropout', 0.0)
 
@@ -124,7 +120,7 @@ def load_model(checkpoint_path, device,
     model = LatentModel(
         num_hidden, x_dim=3, y_dim=3,
         num_layers=num_layers,
-        ffn_expansion=ffn_expansion, dropout=dropout,
+        dropout=dropout,
     ).to(device)
     model.load_state_dict(ckpt['model'])
     model.eval()
@@ -133,7 +129,7 @@ def load_model(checkpoint_path, device,
 
 @t.no_grad()
 def evaluate(checkpoint_path, cache_dir, split='test', num_hidden=None,
-             num_layers=None, ffn_expansion=None, dropout=None,
+             num_layers=None, dropout=None,
              context_frac=0.5, n_samples=30, batch_size=16, split_seed=42,
              eval_seed=0, device=None, verbose=True):
     """
@@ -146,7 +142,7 @@ def evaluate(checkpoint_path, cache_dir, split='test', num_hidden=None,
         device = t.device(device)
 
     model, ckpt = load_model(checkpoint_path, device, num_hidden, num_layers,
-                             ffn_expansion, dropout)
+                             dropout)
 
     train_ids, val_ids, test_ids = day_grouped_split(
         cache_dir, seed=split_seed
@@ -276,7 +272,6 @@ if __name__ == '__main__':
     )
     parser.add_argument('--hidden', type=int, default=None)
     parser.add_argument('--layers', type=int, default=None)
-    parser.add_argument('--ffn-expansion', type=int, default=None)
     parser.add_argument('--dropout', type=float, default=None)
     parser.add_argument(
         '--context-frac', type=float, default=0.5,
@@ -303,7 +298,6 @@ if __name__ == '__main__':
         split=args.split,
         num_hidden=args.hidden,
         num_layers=args.layers,
-        ffn_expansion=args.ffn_expansion,
         dropout=args.dropout,
         context_frac=args.context_frac,
         n_samples=args.samples,

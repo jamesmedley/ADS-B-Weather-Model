@@ -11,7 +11,7 @@ import torch.nn as nn
 from torch.distributions import kl_divergence
 
 from wind_map.module import (
-    LatentEncoder, DeterministicEncoder, Decoder, Attention
+    LatentEncoder, DeterministicEncoder, Decoder,
 )
 
 
@@ -32,47 +32,41 @@ class LatentModel(nn.Module):
         loss  scalar          — negative ELBO (training only, else None)
     """
 
-    def __init__(self, num_hidden, x_dim=3, y_dim=3, num_heads=8,
-                 num_layers=2, ffn_expansion=2, dropout=0.0):
+    def __init__(self, num_hidden, x_dim=3, y_dim=3, num_heads=4,
+                 num_layers=4, dropout=0.0,
+                 free_bits=0.01):
         super(LatentModel, self).__init__()
         self.x_dim = x_dim
         self.y_dim = y_dim
+        self.free_bits = free_bits
 
         assert num_hidden % num_heads == 0, (
             f"num_hidden ({num_hidden}) must be divisible"
             f" by num_heads ({num_heads})")
 
-        latent_encoder_output_sizes = [num_hidden] * 4
         num_latents = num_hidden
-        deterministic_encoder_output_sizes = [num_hidden] * 4
         decoder_output_sizes = [num_hidden] * 2 + [2 * y_dim]
-        attention_output_sizes = [num_hidden] * 2
 
         self.latent_encoder = LatentEncoder(
-            x_dim, y_dim, latent_encoder_output_sizes, num_latents,
+            num_hidden, num_latents,
+            x_dim=x_dim, y_dim=y_dim,
             num_heads=num_heads, num_layers=num_layers,
-            ffn_expansion=ffn_expansion, dropout=dropout)
-
-        cross_attention = Attention(
-            x_size=x_dim, rep='mlp', output_sizes=attention_output_sizes,
-            att_type='multihead', d_v=deterministic_encoder_output_sizes[-1],
-            num_heads=num_heads)
+            dropout=dropout)
 
         self.deterministic_encoder = DeterministicEncoder(
-            x_dim, y_dim, deterministic_encoder_output_sizes, cross_attention,
+            num_hidden,
+            x_dim=x_dim, y_dim=y_dim,
             num_heads=num_heads, num_layers=num_layers,
-            ffn_expansion=ffn_expansion, dropout=dropout)
+            dropout=dropout)
 
-        representation_size = (
-            deterministic_encoder_output_sizes[-1] + num_latents
-        )
+        representation_size = num_hidden + num_latents
         self.decoder = Decoder(
             x_dim, representation_size, decoder_output_sizes,
-            dropout=dropout
+            target_hidden=num_hidden, dropout=dropout
         )
 
     def forward(self, context_x, context_y, target_x, target_y=None,
-                context_mask=None, target_mask=None):
+                context_mask=None, target_mask=None, kl_weight=1.0):
         num_targets = target_x.size(1)
 
         # Prior from context
@@ -101,7 +95,9 @@ class LatentModel(nn.Module):
 
         if target_y is not None:
             log_p = dist.log_prob(target_y).sum(dim=-1)
-            kl_per_sample = kl_divergence(posterior, prior).sum(dim=-1)
+            kl_per_dim = kl_divergence(posterior, prior)
+            kl_per_dim = t.clamp(kl_per_dim, min=self.free_bits)
+            kl_per_sample = kl_per_dim.sum(dim=-1)
             kl = kl_per_sample.unsqueeze(1).expand(-1, num_targets)
 
             if target_mask is not None:
@@ -116,7 +112,9 @@ class LatentModel(nn.Module):
                 )
                 log_p_sum = log_p.sum(dim=1)
 
-            loss = -t.mean((log_p_sum - kl_per_sample) / n_valid)
+            recon = -t.mean(log_p_sum / n_valid)
+            kl_term = kl_weight * t.mean(kl_per_sample)
+            loss = recon + kl_term
         else:
             kl = None
             loss = None

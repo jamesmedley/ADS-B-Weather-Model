@@ -1,13 +1,12 @@
 """
 module.py — Attentive Neural Process building blocks.
+Based on DeepMind ANP design.
 
-Pipeline: concat(x, y) -> BatchMLP -> self-attention -> aggregate -> ...
+Pipeline: concat(x, y) -> Linear -> self-attention -> aggregate -> ...
   Latent path:   self-attention -> mean -> mu/log_sigma -> z
   Deterministic: self-attention + cross-attention -> r*
   Decoder:       concat(r*, z, target_x) -> MLP -> mu, sigma
 """
-
-import math
 
 import torch
 import torch.nn as nn
@@ -15,189 +14,58 @@ import torch.nn.functional as F
 from torch.distributions import Normal
 
 
-class BatchMLP(nn.Module):
-    """MLP applied to the last axis of a [B, n, d_in] tensor."""
-
-    def __init__(self, in_size, output_sizes):
-        super().__init__()
-        layers = []
-        current = in_size
-        for size in output_sizes[:-1]:
-            layers.append(nn.Linear(current, size))
-            layers.append(nn.ReLU())
-            current = size
-        layers.append(nn.Linear(current, output_sizes[-1]))
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, x):
-        B, n, _ = x.shape
-        out = self.net(x.reshape(B * n, -1))
-        return out.reshape(B, n, -1)
-
-
 # ---------------------------------------------------------------------------
-# Attention
+# Attention (matches DeepMind ANP: multihead + residual + LayerNorm)
 # ---------------------------------------------------------------------------
 
-def dot_product_attention(q, k, v, normalise, mask=None):
-    """Scaled dot-product attention. mask=True means real data."""
-    d_k = q.shape[-1]
-    scale = math.sqrt(d_k)
-    unnorm_weights = torch.einsum('bmd,bnd->bmn', q, k) / scale
+class Attention(nn.Module):
+    """Multihead attention with residual connection and LayerNorm.
 
-    if mask is not None:
-        key_mask = mask.unsqueeze(1)
-        if normalise:
-            unnorm_weights = unnorm_weights.masked_fill(
-                ~key_mask, float('-inf')
-            )
-        else:
-            unnorm_weights = unnorm_weights.masked_fill(~key_mask, -1e9)
+    DeepMind ANP design:
+      key, value, query (d_in) -> Linear(d_in,d_in) -> multihead ->
+      cat([residual, result]) -> Linear(2*d_in, d_in) -> dropout ->
+      + residual -> LayerNorm -> output
+    """
 
-    if normalise:
-        weights = torch.softmax(unnorm_weights, dim=-1)
-    else:
-        weights = torch.sigmoid(unnorm_weights)
-        if mask is not None:
-            weights = weights * key_mask
-
-    rep = torch.einsum('bmn,bnd->bmd', weights, v)
-    return rep
-
-
-class MultiheadAttentionModule(nn.Module):
-    """Multi-head cross-attention with per-head 1x1 conv projections
-    (summed, not concatenated)."""
-
-    def __init__(self, d_k, d_v, num_heads=8):
+    def __init__(self, num_hidden, h=4, dropout=0.1):
         super().__init__()
-        self._num_heads = num_heads
-        self._d_v = d_v
-        self.head_size = d_v // num_heads
-        self.wq = nn.Linear(d_k, d_v, bias=False)
-        self.wk = nn.Linear(d_k, d_v, bias=False)
-        self.wv = nn.Linear(d_v, d_v, bias=False)
-        self.wo = nn.Linear(d_v, d_v, bias=False)
+        self.num_hidden = num_hidden
+        self.num_hidden_per_attn = num_hidden // h
+        self.h = h
 
-    def forward(self, q, k, v, mask=None):
-        B, m, _ = q.shape
-        n = k.shape[1]
-        H, hs = self._num_heads, self.head_size
+        self.key = nn.Linear(num_hidden, num_hidden, bias=False)
+        self.value = nn.Linear(num_hidden, num_hidden, bias=False)
+        self.query = nn.Linear(num_hidden, num_hidden, bias=False)
 
-        q_h = self.wq(q).view(B, m, H, hs).transpose(1, 2)
-        k_h = self.wk(k).view(B, n, H, hs).transpose(1, 2)
-        v_h = self.wv(v).view(B, n, H, hs).transpose(1, 2)
+        self.residual_dropout = nn.Dropout(p=dropout)
+        self.final_linear = nn.Linear(num_hidden * 2, num_hidden)
+        self.layer_norm = nn.LayerNorm(num_hidden)
+
+    def forward(self, key, value, query, mask=None):
+        residual = query
+        B, seq_q, _ = query.shape
+        seq_k = key.size(1)
+        H, hs = self.h, self.num_hidden_per_attn
+
+        k = self.key(key).view(B, seq_k, H, hs).transpose(1, 2)
+        v = self.value(value).view(B, seq_k, H, hs).transpose(1, 2)
+        q = self.query(query).view(B, seq_q, H, hs).transpose(1, 2)
 
         scale = hs ** 0.5
-        attn = torch.einsum('bhmd,bhnd->bhmn', q_h, k_h) / scale
+        attn = torch.einsum('bhmd,bhnd->bhmn', q, k) / scale
         if mask is not None:
             attn = attn.masked_fill(~mask[:, None, None, :], float('-inf'))
         attn = torch.softmax(attn, dim=-1)
 
-        out = torch.einsum('bhmn,bhnd->bhmd', attn, v_h)
-        out = out.transpose(1, 2).reshape(B, m, H * hs)
-        return self.wo(out)
+        out = torch.einsum('bhmn,bhnd->bhmd', attn, v)
+        out = out.transpose(1, 2).reshape(B, seq_q, H * hs)
 
-
-# ---------------------------------------------------------------------------
-# Self-attention blocks
-# ---------------------------------------------------------------------------
-
-class TransformerBlock(nn.Module):
-    """Pre-norm Transformer block: self-attention + position-wise FFN."""
-
-    def __init__(self, d, num_heads=8, ffn_expansion=2, dropout=0.0):
-        super().__init__()
-        self.norm1 = nn.LayerNorm(d)
-        self.attn = MultiheadAttentionModule(d_k=d, d_v=d, num_heads=num_heads)
-        self.norm2 = nn.LayerNorm(d)
-        self.ffn = nn.Sequential(
-            nn.Linear(d, d * ffn_expansion),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(d * ffn_expansion, d),
-        )
-        self.drop = nn.Dropout(dropout)
-
-    def forward(self, x, mask=None):
-        normed = self.norm1(x)
-        x = x + self.drop(self.attn(q=normed, k=normed, v=normed, mask=mask))
-        x = x + self.drop(self.ffn(self.norm2(x)))
-        return x
-
-
-class SelfAttentionStack(nn.Module):
-    """Stack of TransformerBlocks with a final LayerNorm."""
-
-    def __init__(self, d, num_layers=2, num_heads=8,
-                 ffn_expansion=2, dropout=0.0):
-        super().__init__()
-        self.blocks = nn.ModuleList([
-            TransformerBlock(d, num_heads=num_heads,
-                             ffn_expansion=ffn_expansion,
-                             dropout=dropout)
-            for _ in range(num_layers)
-        ])
-        self.norm = nn.LayerNorm(d)
-
-    def forward(self, x, mask=None):
-        for block in self.blocks:
-            x = block(x, mask=mask)
-        return self.norm(x)
-
-
-# ---------------------------------------------------------------------------
-# Attention wrapper
-# ---------------------------------------------------------------------------
-
-class Attention(nn.Module):
-    """Wraps key/query representation and attention type choice."""
-
-    def __init__(self, x_size, rep, output_sizes, att_type, d_v=None,
-                 scale=1., normalise=True, num_heads=8):
-        super().__init__()
-        self._rep = rep
-        self._type = att_type
-        self._scale = scale
-        self._normalise = normalise
-        self._num_heads = num_heads
-
-        if rep == 'mlp':
-            assert output_sizes is not None
-            self.mlp = BatchMLP(x_size, output_sizes)
-            d_k = output_sizes[-1]
-        elif rep == 'identity':
-            self.mlp = None
-            d_k = x_size
-        else:
-            raise NameError("'rep' not among ['identity', 'mlp']")
-
-        if att_type == 'multihead':
-            assert d_v is not None
-            self.multihead = MultiheadAttentionModule(d_k, d_v, num_heads)
-        else:
-            self.multihead = None
-
-    def forward(self, x1, x2, r, mask=None):
-        """x1=context x, x2=target x, r=context representations.
-        mask=True for real keys."""
-        if self._rep == 'identity':
-            k, q = x1, x2
-        elif self._rep == 'mlp':
-            k = self.mlp(x1)
-            q = self.mlp(x2)
-        else:
-            raise NameError("'rep' not among ['identity', 'mlp']")
-
-        if self._type == 'dot_product':
-            rep = dot_product_attention(q, k, r, self._normalise, mask=mask)
-        elif self._type == 'multihead':
-            rep = self.multihead(q, k, r, mask=mask)
-        else:
-            raise NameError("'att_type' not among ['uniform','laplace',"
-                            "'dot_product','multihead']")
-
-        return rep
+        result = torch.cat([residual, out], dim=-1)
+        result = self.final_linear(result)
+        result = self.residual_dropout(result)
+        result = result + residual
+        result = self.layer_norm(result)
+        return result, attn
 
 
 # ---------------------------------------------------------------------------
@@ -205,36 +73,60 @@ class Attention(nn.Module):
 # ---------------------------------------------------------------------------
 
 class DeterministicEncoder(nn.Module):
-    """concat(x,y) -> MLP -> self-attention -> cross-attention -> r*"""
+    """Self-attention on context -> cross-attention context->target -> r*.
 
-    def __init__(self, x_size, y_size, output_sizes, attention,
-                 num_heads=8, num_layers=2, ffn_expansion=2, dropout=0.0):
+    Keys/values come from self-attended context representations.
+    Queries come from target_x encoded through same projection (zeros for y).
+    """
+
+    def __init__(self, num_hidden, x_dim=3, y_dim=3,
+                 num_heads=4, num_layers=4, dropout=0.0):
         super().__init__()
-        self._attention = attention
-        self.encoder_mlp = BatchMLP(x_size + y_size, output_sizes)
-        self.self_attn = SelfAttentionStack(
-            output_sizes[-1], num_layers=num_layers, num_heads=num_heads,
-            ffn_expansion=ffn_expansion, dropout=dropout)
+        self.y_dim = y_dim
+        self.input_projection = nn.Linear(x_dim + y_dim, num_hidden)
+        self.self_attentions = nn.ModuleList([
+            Attention(num_hidden, h=num_heads, dropout=dropout)
+            for _ in range(num_layers)
+        ])
+        self.cross_attentions = nn.ModuleList([
+            Attention(num_hidden, h=num_heads, dropout=dropout)
+            for _ in range(num_layers)
+        ])
 
     def forward(self, context_x, context_y, target_x, context_mask=None):
+        # Context: concat(x,y) -> projection -> self-attention
         encoder_input = torch.cat([context_x, context_y], dim=-1)
-        hidden = self.encoder_mlp(encoder_input)
-        hidden = self.self_attn(hidden, mask=context_mask)
-        return self._attention(context_x, target_x, hidden, mask=context_mask)
+        hidden = self.input_projection(encoder_input)
+        for attn in self.self_attentions:
+            hidden, _ = attn(hidden, hidden, hidden, mask=context_mask)
+
+        # Target queries: target_x through same projection (zeros for y)
+        B, N_tgt = target_x.shape[:2]
+        dummy_y = torch.zeros(B, N_tgt, self.y_dim,
+                              dtype=target_x.dtype, device=target_x.device)
+        tgt_input = torch.cat([target_x, dummy_y], dim=-1)
+        query = self.input_projection(tgt_input)
+
+        # Cross-attention: keys/values from context, queries from targets
+        for attn in self.cross_attentions:
+            query, _ = attn(hidden, hidden, query, mask=context_mask)
+
+        return query
 
 
 class LatentEncoder(nn.Module):
-    """concat(x,y) -> MLP -> self-attention -> mean -> mu/log_sigma -> z"""
+    """concat(x,y) -> projection -> self-attention -> mean -> mu/log_sigma -> z"""
 
-    def __init__(self, x_size, y_size, output_sizes, num_latents,
-                 num_heads=8, num_layers=2, ffn_expansion=2, dropout=0.0):
+    def __init__(self, num_hidden, num_latents, x_dim=3, y_dim=3,
+                 num_heads=4, num_layers=4, dropout=0.0):
         super().__init__()
-        self.encoder_mlp = BatchMLP(x_size + y_size, output_sizes)
-        self.self_attn = SelfAttentionStack(
-            output_sizes[-1], num_layers=num_layers, num_heads=num_heads,
-            ffn_expansion=ffn_expansion, dropout=dropout)
+        self.input_projection = nn.Linear(x_dim + y_dim, num_hidden)
+        self.self_attentions = nn.ModuleList([
+            Attention(num_hidden, h=num_heads, dropout=dropout)
+            for _ in range(num_layers)
+        ])
 
-        d = output_sizes[-1]
+        d = num_hidden
         penultimate_size = int((d + num_latents) / 2)
         self.penultimate_layer = nn.Linear(d, penultimate_size)
         self.mean_layer = nn.Linear(penultimate_size, num_latents)
@@ -242,8 +134,9 @@ class LatentEncoder(nn.Module):
 
     def forward(self, x, y, mask=None):
         encoder_input = torch.cat([x, y], dim=-1)
-        hidden = self.encoder_mlp(encoder_input)
-        hidden = self.self_attn(hidden, mask=mask)
+        hidden = self.input_projection(encoder_input)
+        for attn in self.self_attentions:
+            hidden, _ = attn(hidden, hidden, hidden, mask=mask)
 
         if mask is None:
             hidden = hidden.mean(dim=1)
@@ -255,18 +148,22 @@ class LatentEncoder(nn.Module):
         hidden = F.relu(self.penultimate_layer(hidden))
         mu = self.mean_layer(hidden)
         log_sigma = self.std_layer(hidden)
-        sigma = 0.05 + F.softplus(log_sigma)
+        sigma = F.softplus(log_sigma) + 1e-6
 
         return Normal(loc=mu, scale=sigma)
 
 
 class Decoder(nn.Module):
-    """concat(representation, target_x) -> MLP -> mu, sigma"""
+    """concat(representation, projected_target_x) -> MLP -> mu, sigma"""
 
-    def __init__(self, x_size, representation_size, output_sizes, dropout=0.0):
+    def __init__(self, x_size, representation_size, output_sizes,
+                 target_hidden=None, dropout=0.0):
         super().__init__()
+        if target_hidden is None:
+            target_hidden = output_sizes[0]
+        self.target_projection = nn.Linear(x_size, target_hidden)
         layers = []
-        current = x_size + representation_size
+        current = representation_size + target_hidden
         for size in output_sizes[:-1]:
             layers.append(nn.Linear(current, size))
             layers.append(nn.ReLU())
@@ -276,6 +173,7 @@ class Decoder(nn.Module):
         self.decoder_mlp = nn.Sequential(*layers)
 
     def forward(self, representation, target_x):
+        target_x = self.target_projection(target_x)
         hidden = torch.cat([representation, target_x], dim=-1)
         hidden = self.decoder_mlp(hidden)
         mu, log_sigma = hidden.chunk(2, dim=-1)

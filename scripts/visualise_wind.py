@@ -31,12 +31,12 @@ KM_PER_DEG_LON = 111.0 * np.cos(np.radians(CENTRE_LAT))
 
 def plot_wind(checkpoint, alt_ft, context, n_samples,
               n_lat, n_lon, output,
-              num_hidden, num_layers, ffn_expansion,
+              num_hidden, num_layers,
               snapshot_id=None, snapshot_time=None,
               lat_range_deg=None, lon_range_deg=None):
     predictor = WindPredictor(
         checkpoint, num_hidden=num_hidden,
-        num_layers=num_layers, ffn_expansion=ffn_expansion)
+        num_layers=num_layers)
 
     eff_lat_range = (lat_range_deg if lat_range_deg is not None
                      else LAT_RANGE_DEG)
@@ -69,9 +69,17 @@ def plot_wind(checkpoint, alt_ft, context, n_samples,
 
     heat_dir_std = heat_result["wind_dir_std"].reshape(n_lat * 3, n_lon * 3)
     heat_spd_std = heat_result["wind_speed_std"].reshape(n_lat * 3, n_lon * 3)
+
+    # Percentile-based normalisation: 2nd-98th percentile mapped to [0, 1]
+    # so the heatmap shows spatial structure rather than being dominated
+    # by outlier values or washed out by global-max scaling.
+    def _pct_normalise(arr, lo=2, hi=98):
+        vmin = np.percentile(arr, lo)
+        vmax = np.percentile(arr, hi)
+        return np.clip((arr - vmin) / (vmax - vmin + 1e-9), 0, 1)
+
     heat_unc = 0.5 * (
-            heat_dir_std / (heat_dir_std.max() + 1e-9) +
-            heat_spd_std / (heat_spd_std.max() + 1e-9))
+        _pct_normalise(heat_dir_std) + _pct_normalise(heat_spd_std))
 
     # Mercator coords
     mx, my = lonlat_to_mercator(lon_grid, lat_grid)
@@ -157,9 +165,8 @@ if __name__ == "__main__":
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--alt_ft", type=float, default=35000)
     p.add_argument("--output", default="outputs/imgs/wind_field.png")
-    p.add_argument("--hidden", type=int, default=256)
-    p.add_argument("--num_layers", type=int, default=2)
-    p.add_argument("--ffn_expansion", type=int, default=4)
+    p.add_argument("--hidden", type=int, default=128)
+    p.add_argument("--num_layers", type=int, default=4)
     p.add_argument("--samples", type=int, default=1000)
     p.add_argument("--grid_lat", type=int, default=25)
     p.add_argument("--grid_lon", type=int, default=25)
@@ -205,7 +212,6 @@ if __name__ == "__main__":
         output=args.output,
         num_hidden=args.hidden,
         num_layers=args.num_layers,
-        ffn_expansion=args.ffn_expansion,
         snapshot_id=sid,
         snapshot_time=snapshot_time,
         lat_range_deg=lat_range_deg,

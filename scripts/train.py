@@ -21,15 +21,13 @@ if __name__ == '__main__':
     parser.add_argument(
         '--epochs', type=int, default=1000)
     parser.add_argument(
-        '--hidden', type=int, default=256)
+        '--hidden', type=int, default=128)
     parser.add_argument(
-        '--batch', type=int, default=150)
+        '--batch', type=int, default=256)
     parser.add_argument(
         '--workers', type=int, default=4)
     parser.add_argument(
-        '--layers', type=int, default=2)
-    parser.add_argument(
-        '--ffn-expansion', type=int, default=4)
+        '--layers', type=int, default=4)
     parser.add_argument(
         '--dropout', type=float, default=0.2)
     parser.add_argument(
@@ -42,6 +40,12 @@ if __name__ == '__main__':
         '--warmup-frac', type=float, default=None,
         help='Warmup as fraction of total run steps'
              ' (overrides --warmup-steps)')
+    parser.add_argument(
+        '--kl-warmup-steps', type=int, default=2000,
+        help='KL weight linear warmup steps')
+    parser.add_argument(
+        '--free-bits', type=float, default=0.01,
+        help='Free bits per latent dimension (nats)')
     parser.add_argument(
         '--checkpoint-dir',
         default='./checkpoint')
@@ -65,11 +69,12 @@ if __name__ == '__main__':
         batch_size=args.batch,
         num_workers=args.workers,
         num_layers=args.layers,
-        ffn_expansion=args.ffn_expansion,
         dropout=args.dropout,
         lr=args.lr,
         warmup_steps=args.warmup_steps,
         warmup_frac=args.warmup_frac,
+        kl_warmup_steps=args.kl_warmup_steps,
+        free_bits=args.free_bits,
         checkpoint_dir=args.checkpoint_dir,
         init_checkpoint=args.init_checkpoint,
         patience=args.patience,

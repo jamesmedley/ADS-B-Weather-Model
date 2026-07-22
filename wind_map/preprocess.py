@@ -26,8 +26,8 @@ CENTRE_LAT = 51.071066
 CENTRE_LON = -1.042441
 
 MAX_ALT_FT = 50_000.0
-WIND_SPEED_MEAN = 35.09  # placeholder — computed by convert_db.py
-WIND_SPEED_STD = 23.08    # placeholder — computed by convert_db.py
+WIND_SPEED_MEAN = 35.08990871088307  # computed by convert_db.py
+WIND_SPEED_STD = 23.082372317152036    # computed by convert_db.py
 MIN_AIRCRAFT = 2
 
 # Half-width of the service area in degrees (~70km radius)
@@ -349,11 +349,18 @@ def collate_fn(batch, augment=True):
     return context_x, context_y, target_x, target_y, context_mask, target_mask
 
 
+def _worker_init(worker_id):
+    """Reseed numpy RNG per DataLoader worker."""
+    import torch
+    np.random.seed((torch.initial_seed() + worker_id) % 2**32)
+
+
 def make_dataloader(cache_dir, batch_size=16, shuffle=True, num_workers=4):
     dataset = WindSnapshotDataset(cache_dir)
     return DataLoader(
         dataset, batch_size=batch_size, shuffle=shuffle,
         collate_fn=collate_fn, num_workers=num_workers,
+        worker_init_fn=_worker_init,
         persistent_workers=num_workers > 0)
 
 

@@ -18,8 +18,7 @@ space = [
     Real(1e-4, 1e-2, "log-uniform"),   # learning rate
     Categorical([64, 128, 256]),        # hidden
     Integer(128, 384),                  # batch size
-    Integer(2, 4),                      # layers
-    Integer(1, 4),                      # ffn expansion
+    Integer(1, 4),                      # layers
 ]
 
 n = 0
@@ -33,12 +32,11 @@ def make_objective(cache_dir, search_epochs,
         global n
         n += 1
         print(f"Search Run {n}")
-        lr, hidden, batch, layers, ffn_expansion = params
+        lr, hidden, batch, layers = params
         lr = float(lr)
         hidden = int(hidden)
         batch = int(batch)
         layers = int(layers)
-        ffn_expansion = int(ffn_expansion)
 
         train_result = train(
             cache_dir=cache_dir,
@@ -47,7 +45,6 @@ def make_objective(cache_dir, search_epochs,
             batch_size=batch,
             num_workers=num_workers,
             num_layers=layers,
-            ffn_expansion=ffn_expansion,
             dropout=dropout,
             lr=lr,
             warmup_frac=warmup_frac,
@@ -62,7 +59,7 @@ def make_objective(cache_dir, search_epochs,
         val_loss = train_result['best_val_loss']
         print(f"  val_loss={val_loss:.4f}  "
               f"(lr={lr:.2e} hidden={hidden} batch={batch} layers={layers} "
-              f"dropout={dropout:.3f} ffn_expansion={ffn_expansion})")
+               f"dropout={dropout:.3f})")
         return val_loss
 
     return objective

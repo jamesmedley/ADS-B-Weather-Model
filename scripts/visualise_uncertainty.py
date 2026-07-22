@@ -43,10 +43,15 @@ from wind_map.utils import (
 # --- Model + tensor plumbing ---
 
 def load_model(checkpoint_path, num_hidden, num_layers, device):
-    model = LatentModel(num_hidden, num_layers=num_layers).to(device)
     ckpt = torch.load(
         checkpoint_path, map_location=device,
         weights_only=False)
+    hp = ckpt.get('hparams', {})
+    num_hidden = num_hidden or hp.get('num_hidden', 128)
+    num_layers = num_layers or hp.get('num_layers', 4)
+    dropout = hp.get('dropout', 0.0)
+    model = LatentModel(num_hidden, num_layers=num_layers,
+                        dropout=dropout).to(device)
     model.load_state_dict(ckpt['model'])
     model.eval()
     print(f"Loaded checkpoint from epoch {ckpt.get('epoch', '?')} "
@@ -100,7 +105,7 @@ def predict_components(model, context, queries, n_samples, device):
 
     # Epistemic: spread of mu(z) across z-draws
     epistemic_dir_std = circular_std(sample_dirs, axis=0)
-    epistemic_speed_std = sample_speeds.std(axis=0)
+    epistemic_speed_std = sample_speeds.std(axis=0, ddof=1)
 
     # Aleatoric: delta-method propagation of sigma
     sin_sig = sigma_stack[..., 0]
@@ -206,7 +211,7 @@ def plot_components(result, lat_grid, lon_grid, alt_ft, n_lat, n_lon, output,
             unc_map, origin="lower",
             extent=[lon_grid.min(), lon_grid.max(),
                     lat_grid.min(), lat_grid.max()],
-            cmap="inferno", interpolation="bilinear",
+            cmap="inferno", interpolation="nearest",
             aspect="auto")
 
         if not averaged:
@@ -256,7 +261,7 @@ if __name__ == "__main__":
         "--output",
         default="outputs/imgs/uncertainty_components.png")
     p.add_argument("--hidden", type=int, default=128)
-    p.add_argument("--num_layers", type=int, default=2)
+    p.add_argument("--num_layers", type=int, default=4)
     p.add_argument("--samples", type=int, default=1000)
     p.add_argument("--grid_lat", type=int, default=25)
     p.add_argument("--grid_lon", type=int, default=25)

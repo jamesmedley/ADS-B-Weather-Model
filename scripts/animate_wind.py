@@ -132,13 +132,13 @@ class ParticleSwarm:
 
 def build_wind_gif(checkpoint, alt_ft, context, n_samples,
                    n_lat, n_lon, output,
-                   num_hidden, num_layers, ffn_expansion,
+                   num_hidden, num_layers,
                    n_particles, n_frames, fps, dt_seconds, trail_len,
                    snapshot_id=None, snapshot_time=None,
                    lat_range_deg=None, lon_range_deg=None, seed=0):
     predictor = WindPredictor(
         checkpoint, num_hidden=num_hidden,
-        num_layers=num_layers, ffn_expansion=ffn_expansion)
+        num_layers=num_layers)
 
     eff_lat_range = (lat_range_deg if lat_range_deg is not None
                      else LAT_RANGE_DEG)
@@ -335,9 +335,8 @@ if __name__ == "__main__":
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--alt_ft", type=float, default=35000)
     p.add_argument("--output", default="outputs/imgs/wind_flow.gif")
-    p.add_argument("--hidden", type=int, default=256)
-    p.add_argument("--num_layers", type=int, default=2)
-    p.add_argument("--ffn_expansion", type=int, default=4)
+    p.add_argument("--hidden", type=int, default=128)
+    p.add_argument("--num_layers", type=int, default=4)
     p.add_argument("--samples", type=int, default=1000)
     p.add_argument("--grid_lat", type=int, default=45)
     p.add_argument("--grid_lon", type=int, default=45)
@@ -388,7 +387,6 @@ if __name__ == "__main__":
         output=args.output,
         num_hidden=args.hidden,
         num_layers=args.num_layers,
-        ffn_expansion=args.ffn_expansion,
         n_particles=args.n_particles,
         n_frames=args.n_frames,
         fps=args.fps,
