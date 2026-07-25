@@ -39,9 +39,21 @@ def load_model_checkpoint(checkpoint_path, device, num_hidden=None,
         raise ValueError(
             "No 'hparams' in checkpoint — pass num_hidden explicitly.")
 
+    num_decoder_layers = hp.get('num_decoder_layers', 3)
+    use_nearest_dist = hp.get('use_nearest_dist', False)
+    use_dist_bias = hp.get('use_dist_bias', False)
+    smoothness_weight = hp.get('smoothness_weight', 0.0)
+    smoothness_noise_scale = hp.get('smoothness_noise_scale', 0.05)
+
     model = LatentModel(
-        num_hidden, num_layers=num_layers,
+        num_hidden, x_dim=3,
+        num_layers=num_layers,
         dropout=dropout,
+        use_nearest_dist=use_nearest_dist,
+        use_dist_bias=use_dist_bias,
+        smoothness_weight=smoothness_weight,
+        smoothness_noise_scale=smoothness_noise_scale,
+        num_decoder_layers=num_decoder_layers,
     ).to(device)
     model.load_state_dict(ckpt['model'])
     model.eval()

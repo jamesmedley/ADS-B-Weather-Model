@@ -29,6 +29,9 @@ if __name__ == '__main__':
     parser.add_argument(
         '--layers', type=int, default=4)
     parser.add_argument(
+        '--decoder-layers', type=int, default=3,
+        help='Number of hidden layers in the decoder MLP')
+    parser.add_argument(
         '--dropout', type=float, default=0.2)
     parser.add_argument(
         '--lr', type=float, default=1.65e-03)
@@ -59,6 +62,21 @@ if __name__ == '__main__':
     parser.add_argument(
         '--no-amp', action='store_true',
         help='Disable automatic mixed precision')
+    parser.add_argument(
+        '--weight-decay', type=float, default=1e-5,
+        help='Weight decay for AdamW')
+    parser.add_argument(
+        '--no-nearest-dist', action='store_true',
+        help='Disable nearest-context-distance decoder feature')
+    parser.add_argument(
+        '--no-dist-bias', action='store_true',
+        help='Disable distance bias in cross-attention')
+    parser.add_argument(
+        '--smoothness-weight', type=float, default=1.0,
+        help='Smoothness regularizer weight (default: 1.0)')
+    parser.add_argument(
+        '--smoothness-noise-scale', type=float, default=0.02,
+        help='Jitter noise std for smoothness regularizer (default: 0.02)')
 
     args = parser.parse_args()
 
@@ -69,6 +87,7 @@ if __name__ == '__main__':
         batch_size=args.batch,
         num_workers=args.workers,
         num_layers=args.layers,
+        num_decoder_layers=args.decoder_layers,
         dropout=args.dropout,
         lr=args.lr,
         warmup_steps=args.warmup_steps,
@@ -79,4 +98,9 @@ if __name__ == '__main__':
         init_checkpoint=args.init_checkpoint,
         patience=args.patience,
         use_amp=not args.no_amp,
+        weight_decay=args.weight_decay,
+        use_nearest_dist=not args.no_nearest_dist,
+        use_dist_bias=not args.no_dist_bias,
+        smoothness_weight=args.smoothness_weight,
+        smoothness_noise_scale=args.smoothness_noise_scale,
     )

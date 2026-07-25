@@ -28,8 +28,6 @@ best_hyperparameters = {
     "Hidden": result.x[1],
     "Batch": result.x[2],
     "Layers": result.x[3],
-    "Dropout": result.x[4],
-    "FFN Expansion": result.x[5],
 }
 
 print("Best Hyperparameters:")
@@ -42,8 +40,7 @@ with open(os.path.join(args.out_dir, 'best_hyperparameters.txt'), 'w') as f:
         f.write(f"{param}: {value}\n")
 
 param_names = [
-    "Learning Rate", "Hidden", "Batch",
-    "Layers", "Dropout", "FFN Expansion",
+    "Learning Rate", "Hidden", "Batch", "Layers",
 ]
 
 plt.figure(figsize=(12, 8))

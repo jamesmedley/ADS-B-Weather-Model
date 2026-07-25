@@ -99,9 +99,7 @@ if __name__ == '__main__':
     dump(result, args.out, store_objective=False)
 
     print("\nBest Hyperparameters:")
-    names = [
-        'Learning Rate', 'Hidden', 'Batch',
-        'Layers', 'Dropout', 'FFN Expansion']
+    names = ['Learning Rate', 'Hidden', 'Batch', 'Layers']
     for name, value in zip(names, result.x):
         print(f"{name}: {value}")
     print(f"Best val_loss: {result.fun:.4f}")

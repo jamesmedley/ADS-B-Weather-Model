@@ -34,18 +34,23 @@ class LatentModel(nn.Module):
 
     def __init__(self, num_hidden, x_dim=3, y_dim=3, num_heads=4,
                  num_layers=4, dropout=0.0,
-                 free_bits=0.01):
-        super(LatentModel, self).__init__()
-        self.x_dim = x_dim
-        self.y_dim = y_dim
+                 free_bits=0.01,
+                 use_nearest_dist=False, use_dist_bias=False,
+                 smoothness_weight=1.0, smoothness_noise_scale=0.05,
+                 num_decoder_layers=3):
+        super().__init__()
         self.free_bits = free_bits
+        self.use_nearest_dist = use_nearest_dist
+        self.smoothness_weight = smoothness_weight
+        self.smoothness_noise_scale = smoothness_noise_scale
+        self.num_decoder_layers = num_decoder_layers
 
         assert num_hidden % num_heads == 0, (
             f"num_hidden ({num_hidden}) must be divisible"
             f" by num_heads ({num_heads})")
 
         num_latents = num_hidden
-        decoder_output_sizes = [num_hidden] * 2 + [2 * y_dim]
+        decoder_output_sizes = [num_hidden] * num_decoder_layers + [2 * y_dim]
 
         self.latent_encoder = LatentEncoder(
             num_hidden, num_latents,
@@ -57,11 +62,13 @@ class LatentModel(nn.Module):
             num_hidden,
             x_dim=x_dim, y_dim=y_dim,
             num_heads=num_heads, num_layers=num_layers,
-            dropout=dropout)
+            dropout=dropout,
+            use_dist_bias=use_dist_bias)
 
         representation_size = num_hidden + num_latents
+        decoder_x_dim = x_dim + (1 if use_nearest_dist else 0)
         self.decoder = Decoder(
-            x_dim, representation_size, decoder_output_sizes,
+            decoder_x_dim, representation_size, decoder_output_sizes,
             target_hidden=num_hidden, dropout=dropout
         )
 
@@ -91,7 +98,34 @@ class LatentModel(nn.Module):
 
         # Decode to wind distribution parameters
         representation = t.cat([deterministic_rep, latent_rep], dim=-1)
-        dist, mu, sigma = self.decoder(representation, target_x)
+        decoder_x = target_x
+        if self.use_nearest_dist:
+            diff = target_x.unsqueeze(2) - context_x.unsqueeze(1)
+            pairwise_dist = t.norm(diff, dim=-1)
+            if context_mask is not None:
+                pairwise_dist = pairwise_dist.masked_fill(
+                    ~context_mask.unsqueeze(1), float('inf'))
+            min_dist = pairwise_dist.min(dim=-1, keepdim=True).values
+            decoder_x = t.cat([target_x, min_dist], dim=-1)
+        dist, mu, sigma = self.decoder(representation, decoder_x)
+
+        # Smoothness regularizer (training only)
+        smooth_loss = t.zeros((), device=target_x.device)
+        if (self.training and self.smoothness_weight > 0
+                and target_y is not None):
+            jitter = (t.randn_like(target_x)
+                      * self.smoothness_noise_scale)
+            decoder_x_jittered = decoder_x.clone()
+            decoder_x_jittered[..., :3] = target_x + jitter
+            _, mu_jittered, _ = self.decoder(
+                representation, decoder_x_jittered)
+            mse = (mu_jittered - mu).pow(2).sum(dim=-1)
+            if target_mask is not None:
+                mse = mse * target_mask.to(mse.dtype)
+                n_valid = target_mask.to(mse.dtype).sum(dim=1).clamp(min=1.0)
+                smooth_loss = (mse.sum(dim=1) / n_valid).mean()
+            else:
+                smooth_loss = mse.mean()
 
         if target_y is not None:
             log_p = dist.log_prob(target_y).sum(dim=-1)
@@ -114,7 +148,7 @@ class LatentModel(nn.Module):
 
             recon = -t.mean(log_p_sum / n_valid)
             kl_term = kl_weight * t.mean(kl_per_sample)
-            loss = recon + kl_term
+            loss = recon + kl_term + self.smoothness_weight * smooth_loss
         else:
             kl = None
             loss = None

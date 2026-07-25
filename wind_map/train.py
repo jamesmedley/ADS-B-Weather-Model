@@ -56,26 +56,28 @@ class EMA:
             flat, alpha=1 - self.decay
         )
 
-    def _to_shadow(self, model):
-        """Copy shadow -> model parameters."""
+    def _to_shadow(self):
+        """Overwrite model parameters with the shadow copy."""
         for p, off, sz in zip(
                 self._params, self._offsets, self._sizes):
             p.data.copy_(self.shadow[off:off + sz].reshape(p.shape))
 
-    def _from_model(self, model):
-        """Copy model parameters -> shadow."""
+    def _from_model(self):
+        """Copy current model parameters into the shadow buffer."""
         for p, off, sz in zip(
                 self._params, self._offsets, self._sizes):
             self.shadow[off:off + sz].copy_(
                 p.data.reshape(-1))
 
     def apply_shadow(self, model):
+        """Backup real weights, then load the shadow weights."""
         flat = t.cat(
             [p.data.reshape(-1) for p in self._params])
         self._backup.copy_(flat)
-        self._to_shadow(model)
+        self._to_shadow()
 
     def restore(self, model):
+        """Restore the real weights from the backup."""
         for p, off, sz in zip(
                 self._params, self._offsets, self._sizes):
             p.data.copy_(
@@ -99,7 +101,13 @@ def train(cache_dir, num_hidden=128, epochs=200,
           save_checkpoint=True,
           run_test_eval=True, verbose=True, patience=50,
           ema_decay=0.999,
-          use_amp=True):
+          use_amp=True,
+          weight_decay=1e-5,
+          use_nearest_dist=True,
+          use_dist_bias=True,
+          smoothness_weight=1.0,
+          smoothness_noise_scale=0.05,
+          num_decoder_layers=3):
     """
     Train the Wind ANP.
 
@@ -157,7 +165,12 @@ def train(cache_dir, num_hidden=128, epochs=200,
         num_hidden, x_dim=3, y_dim=3,
         num_layers=num_layers,
         dropout=dropout,
-        free_bits=free_bits).to(device)
+        free_bits=free_bits,
+        use_nearest_dist=use_nearest_dist,
+        use_dist_bias=use_dist_bias,
+        smoothness_weight=smoothness_weight,
+        smoothness_noise_scale=smoothness_noise_scale,
+        num_decoder_layers=num_decoder_layers).to(device)
 
     if init_checkpoint is not None:
         if verbose:
@@ -175,7 +188,7 @@ def train(cache_dir, num_hidden=128, epochs=200,
                 f"  Loaded (epoch {ep}, "
                 f"val_loss={vl:.4f})")
 
-    optim = t.optim.Adam(model.parameters(), lr=lr)
+    optim = t.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     # AMP setup
     if use_amp and device.type == 'cuda':
@@ -362,6 +375,12 @@ def train(cache_dir, num_hidden=128, epochs=200,
                         'ema_decay': ema_decay,
                         'kl_warmup_steps': kl_warmup_steps,
                         'free_bits': free_bits,
+                        'weight_decay': weight_decay,
+                        'use_nearest_dist': use_nearest_dist,
+                        'use_dist_bias': use_dist_bias,
+                        'smoothness_weight': smoothness_weight,
+                        'smoothness_noise_scale': smoothness_noise_scale,
+                        'num_decoder_layers': num_decoder_layers,
                     },
                 }
                 ema.restore(model)

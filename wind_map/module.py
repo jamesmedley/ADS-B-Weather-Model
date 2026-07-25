@@ -25,13 +25,17 @@ class Attention(nn.Module):
       key, value, query (d_in) -> Linear(d_in,d_in) -> multihead ->
       cat([residual, result]) -> Linear(2*d_in, d_in) -> dropout ->
       + residual -> LayerNorm -> output
+
+    When ``use_dist_bias=True``, adds a learned ALiBi-style distance penalty
+    to attention logits: ``logit -= lambda_h * dist_bias``.
     """
 
-    def __init__(self, num_hidden, h=4, dropout=0.1):
+    def __init__(self, num_hidden, h=4, dropout=0.1, use_dist_bias=False):
         super().__init__()
         self.num_hidden = num_hidden
         self.num_hidden_per_attn = num_hidden // h
         self.h = h
+        self.use_dist_bias = use_dist_bias
 
         self.key = nn.Linear(num_hidden, num_hidden, bias=False)
         self.value = nn.Linear(num_hidden, num_hidden, bias=False)
@@ -41,7 +45,10 @@ class Attention(nn.Module):
         self.final_linear = nn.Linear(num_hidden * 2, num_hidden)
         self.layer_norm = nn.LayerNorm(num_hidden)
 
-    def forward(self, key, value, query, mask=None):
+        if use_dist_bias:
+            self.log_lambda = nn.Parameter(torch.full((h,), -2.3))
+
+    def forward(self, key, value, query, mask=None, dist_bias=None):
         residual = query
         B, seq_q, _ = query.shape
         seq_k = key.size(1)
@@ -53,6 +60,9 @@ class Attention(nn.Module):
 
         scale = hs ** 0.5
         attn = torch.matmul(q, k.transpose(-2, -1)) / scale
+        if self.use_dist_bias and dist_bias is not None:
+            lambda_ = self.log_lambda.exp().view(1, H, 1, 1)
+            attn = attn - lambda_ * dist_bias.unsqueeze(1)
         if mask is not None:
             attn = attn.masked_fill(~mask[:, None, None, :], float('-inf'))
         attn = torch.softmax(attn, dim=-1)
@@ -80,16 +90,19 @@ class DeterministicEncoder(nn.Module):
     """
 
     def __init__(self, num_hidden, x_dim=3, y_dim=3,
-                 num_heads=4, num_layers=4, dropout=0.0):
+                 num_heads=4, num_layers=4, dropout=0.0,
+                 use_dist_bias=False):
         super().__init__()
         self.y_dim = y_dim
+        self.use_dist_bias = use_dist_bias
         self.input_projection = nn.Linear(x_dim + y_dim, num_hidden)
         self.self_attentions = nn.ModuleList([
             Attention(num_hidden, h=num_heads, dropout=dropout)
             for _ in range(num_layers)
         ])
         self.cross_attentions = nn.ModuleList([
-            Attention(num_hidden, h=num_heads, dropout=dropout)
+            Attention(num_hidden, h=num_heads, dropout=dropout,
+                      use_dist_bias=use_dist_bias)
             for _ in range(num_layers)
         ])
 
@@ -108,8 +121,12 @@ class DeterministicEncoder(nn.Module):
         query = self.input_projection(tgt_input)
 
         # Cross-attention: keys/values from context, queries from targets
+        dist_bias = None
+        if self.use_dist_bias:
+            dist_bias = torch.cdist(target_x, context_x)
         for attn in self.cross_attentions:
-            query, _ = attn(hidden, hidden, query, mask=context_mask)
+            query, _ = attn(hidden, hidden, query, mask=context_mask,
+                            dist_bias=dist_bias)
 
         return query
 
