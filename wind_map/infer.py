@@ -13,7 +13,7 @@ import torch
 import numpy as np
 from wind_map.network import LatentModel
 from wind_map.preprocess import (
-    normalise_coords, encode_wind, WIND_SPEED_MEAN, WIND_SPEED_STD
+    normalise_coords, encode_wind, NormParams, LEGACY_PARAMS,
 )
 from wind_map.utils import circular_mean, circular_std
 
@@ -42,17 +42,12 @@ def load_model_checkpoint(checkpoint_path, device, num_hidden=None,
     num_decoder_layers = hp.get('num_decoder_layers', 3)
     use_nearest_dist = hp.get('use_nearest_dist', False)
     use_dist_bias = hp.get('use_dist_bias', False)
-    smoothness_weight = hp.get('smoothness_weight', 0.0)
-    smoothness_noise_scale = hp.get('smoothness_noise_scale', 0.05)
-
     model = LatentModel(
         num_hidden, x_dim=3,
         num_layers=num_layers,
         dropout=dropout,
         use_nearest_dist=use_nearest_dist,
         use_dist_bias=use_dist_bias,
-        smoothness_weight=smoothness_weight,
-        smoothness_noise_scale=smoothness_noise_scale,
         num_decoder_layers=num_decoder_layers,
     ).to(device)
     model.load_state_dict(ckpt['model'])
@@ -60,15 +55,15 @@ def load_model_checkpoint(checkpoint_path, device, num_hidden=None,
     return model, ckpt
 
 
-def observations_to_tensors(observations, device):
+def observations_to_tensors(observations, device, params: NormParams):
     """Convert observation dicts to (x, y) tensors with batch dimension."""
     xs, ys = [], []
     for obs in observations:
         lat_n, lon_n, alt_n = normalise_coords(
-            obs['lat'], obs['lon'], obs['alt_ft']
+            obs['lat'], obs['lon'], obs['alt_ft'], params
         )
         sin_w, cos_w, spd_n = encode_wind(
-            obs['wind_dir'], obs['wind_speed']
+            obs['wind_dir'], obs['wind_speed'], params
         )
         xs.append([lat_n, lon_n, alt_n])
         ys.append([sin_w, cos_w, spd_n])
@@ -77,18 +72,29 @@ def observations_to_tensors(observations, device):
     return x, y
 
 
-def queries_to_tensor(queries, device):
+def queries_to_tensor(queries, device, params: NormParams):
     """Convert query dicts to target_x tensor with batch dimension."""
     xs = []
     for q in queries:
         lat_n, lon_n, alt_n = normalise_coords(
-            q['lat'], q['lon'], q['alt_ft']
+            q['lat'], q['lon'], q['alt_ft'], params
         )
         xs.append([lat_n, lon_n, alt_n])
     return torch.FloatTensor(xs).unsqueeze(0).to(device)
 
 
-def compute_uncertainty_components(mu_stack, sigma_stack):
+def _log_speed_to_kt(spd_norm, params: NormParams):
+    """Convert normalised log-speed back to knots."""
+    neg = spd_norm < -params.log_speed_mean / params.log_speed_std
+    if np.any(neg):
+        n_neg = int(neg.sum())
+        print(f"  Warning: {n_neg} speed logits produce negative speeds "
+              f"(spd_norm < {(-params.log_speed_mean / params.log_speed_std):.2f})")
+    log_speed = spd_norm * params.log_speed_std + params.log_speed_mean
+    return np.exp(log_speed) - 1
+
+
+def compute_uncertainty_components(mu_stack, sigma_stack, params: NormParams):
     """Given mu_stack [n_samples, N, 3] and sigma_stack [n_samples, N, 3]
     from multiple latent draws, return epistemic and aleatoric uncertainty.
 
@@ -101,9 +107,7 @@ def compute_uncertainty_components(mu_stack, sigma_stack):
     spd_mu = mu_stack[..., 2]
 
     sample_dirs = np.degrees(np.arctan2(sin_mu, cos_mu)) % 360
-    sample_speeds = (
-        np.clip(spd_mu, 0, None) * WIND_SPEED_STD + WIND_SPEED_MEAN
-    )
+    sample_speeds = _log_speed_to_kt(spd_mu, params)
 
     epistemic_dir_std = circular_std(sample_dirs, axis=0)
     epistemic_speed_std = sample_speeds.std(axis=0, ddof=1)
@@ -119,7 +123,10 @@ def compute_uncertainty_components(mu_stack, sigma_stack):
     aleatoric_dir_var_deg2 = np.degrees(np.sqrt(aleatoric_dir_var_rad2)) ** 2
     aleatoric_dir_std = np.sqrt(aleatoric_dir_var_deg2.mean(axis=0))
 
-    aleatoric_speed_var = (spd_sig * WIND_SPEED_STD) ** 2
+    # Log-speed Jacobian: d(speed)/d(spd_norm) = log_speed_std * exp(log_speed)
+    log_speed_mean_rep = params.log_speed_mean + spd_mu * params.log_speed_std
+    jacobian = params.log_speed_std * np.exp(log_speed_mean_rep)
+    aleatoric_speed_var = (spd_sig * jacobian) ** 2
     aleatoric_speed_std = np.sqrt(aleatoric_speed_var.mean(axis=0))
 
     return {
@@ -137,7 +144,7 @@ def compute_uncertainty_components(mu_stack, sigma_stack):
 class WindPredictor:
     def __init__(self, checkpoint_path, num_hidden=None,
                  num_layers=None, dropout=None,
-                 device=None):
+                 device=None, params: NormParams = None):
         if device is None:
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.device = torch.device(device)
@@ -146,11 +153,20 @@ class WindPredictor:
         print(f"Loaded checkpoint from epoch {ckpt.get('epoch', '?')} "
               f"(val_loss={ckpt.get('val_loss', float('nan')):.4f})")
 
+        if params is not None:
+            self.params = params
+        elif 'norm_params' in ckpt:
+            self.params = NormParams(**ckpt['norm_params'])
+        else:
+            self.params = LEGACY_PARAMS
+            print("Warning: checkpoint has no norm_params; "
+                  "using legacy approximate defaults.")
+
     def _obs_to_tensors(self, observations):
-        return observations_to_tensors(observations, self.device)
+        return observations_to_tensors(observations, self.device, self.params)
 
     def _queries_to_tensor(self, queries):
-        return queries_to_tensor(queries, self.device)
+        return queries_to_tensor(queries, self.device, self.params)
 
     @torch.no_grad()
     def predict(self, context_observations, query_points, n_samples=50):
@@ -182,12 +198,13 @@ class WindPredictor:
         cos_mu = mu_stack[..., 1]
         spd_mu = mu_stack[..., 2]
         mu_dirs = np.degrees(np.arctan2(sin_mu, cos_mu)) % 360
-        mu_speeds = np.clip(spd_mu, 0, None) * WIND_SPEED_STD + WIND_SPEED_MEAN
+        mu_speeds = _log_speed_to_kt(spd_mu, self.params)
         mean_dirs = circular_mean(mu_dirs, axis=0)
         mean_speeds = mu_speeds.mean(axis=0)
 
         # Epistemic & aleatoric components
-        components = compute_uncertainty_components(mu_stack, sigma_stack)
+        components = compute_uncertainty_components(
+            mu_stack, sigma_stack, self.params)
 
         # Total uncertainty: sqrt(Var(mu) + E[sigma^2]) — analytic, no MC noise
         total_dir_std = np.sqrt(

@@ -17,7 +17,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from wind_map.preprocess import (
-    CENTRE_LAT, LAT_RANGE_DEG, MAX_ALT_FT, WIND_SPEED_MEAN, WIND_SPEED_STD
+    NormParams, load_params, KM_PER_DEG_LAT,
 )
 
 
@@ -28,16 +28,17 @@ def load_cache(cache_dir):
     return x, y, offsets
 
 
-def to_physical(x, y):
+def to_physical(x, y, params: NormParams):
     """Convert normalised arrays back to physical units."""
-    lat_deg = x[:, 0] * LAT_RANGE_DEG + CENTRE_LAT
-    alt_ft = x[:, 2] * MAX_ALT_FT
+    lat_deg = x[:, 0] * params.range_km / KM_PER_DEG_LAT + params.centre_lat
+    alt_ft = np.exp(x[:, 2] * np.log(1 + params.max_alt_ft)) - 1
     dir_deg = np.degrees(np.arctan2(y[:, 0], y[:, 1])) % 360
-    speed_kt = y[:, 2] * WIND_SPEED_STD + WIND_SPEED_MEAN
+    log_speed = y[:, 2] * params.log_speed_std + params.log_speed_mean
+    speed_kt = np.exp(log_speed) - 1
     return lat_deg, alt_ft, dir_deg, speed_kt
 
 
-def leave_one_out_residuals(x, y, offsets):
+def leave_one_out_residuals(x, y, offsets, params: NormParams):
     """
     For every obs in every snapshot with >= 3 rows, compute the direction
     residual (deg) and speed residual (kt) against the leave-one-out mean
@@ -55,9 +56,12 @@ def leave_one_out_residuals(x, y, offsets):
 
         sin_s = sin_all[start:end]
         cos_s = cos_all[start:end]
-        spd_s = spd_all[start:end] * WIND_SPEED_STD + WIND_SPEED_MEAN
-        lat_s = x[start:end, 0] * LAT_RANGE_DEG + CENTRE_LAT
-        alt_s = x[start:end, 2] * MAX_ALT_FT
+        spd_log = (spd_all[start:end] * params.log_speed_std
+                   + params.log_speed_mean)
+        spd_s = np.exp(spd_log) - 1
+        lat_s = (x[start:end, 0] * params.range_km / KM_PER_DEG_LAT
+                 + params.centre_lat)
+        alt_s = np.exp(x[start:end, 2] * np.log(1 + params.max_alt_ft)) - 1
 
         total_sin, total_cos, total_spd = sin_s.sum(), cos_s.sum(), spd_s.sum()
 
@@ -111,16 +115,19 @@ def main():
 
     print(f"Loading cache from {args.cache} ...")
     x, y, offsets = load_cache(args.cache)
+    params = load_params(args.cache)
     n_snapshots = len(offsets) - 1
     print(f"  {len(x)} observations across {n_snapshots} snapshots")
 
-    lat_min, lat_max = CENTRE_LAT - LAT_RANGE_DEG, CENTRE_LAT + LAT_RANGE_DEG
+    lat_range_deg = params.range_km / KM_PER_DEG_LAT
+    lat_min = params.centre_lat - lat_range_deg
+    lat_max = params.centre_lat + lat_range_deg
 
     # Part 1: leave-one-out local variability by latitude
     print("Computing leave-one-out residuals "
           "(snapshots with >=3 obs)...")
     (lat_r, alt_r, dir_resid,
-     speed_resid) = leave_one_out_residuals(x, y, offsets)
+     speed_resid) = leave_one_out_residuals(x, y, offsets, params)
     print(f"  {len(lat_r)} residuals computed")
 
     dir_centres, dir_means, dir_stds, dir_counts = bin_by_latitude(
@@ -136,7 +143,7 @@ def main():
           "positive => more variable north)")
 
     # Part 2: lat/altitude joint density
-    lat_all, alt_all, _, _ = to_physical(x, y)
+    lat_all, alt_all, _, _ = to_physical(x, y, params)
     band = np.abs(alt_all - args.alt_ft) <= args.alt_tol
     print(f"  {band.sum()} of {len(alt_all)} observations within "
           f"+/-{args.alt_tol:.0f} ft of {args.alt_ft:.0f} ft")

@@ -36,13 +36,10 @@ class LatentModel(nn.Module):
                  num_layers=4, dropout=0.0,
                  free_bits=0.01,
                  use_nearest_dist=False, use_dist_bias=False,
-                 smoothness_weight=1.0, smoothness_noise_scale=0.05,
                  num_decoder_layers=3):
         super().__init__()
         self.free_bits = free_bits
         self.use_nearest_dist = use_nearest_dist
-        self.smoothness_weight = smoothness_weight
-        self.smoothness_noise_scale = smoothness_noise_scale
         self.num_decoder_layers = num_decoder_layers
 
         assert num_hidden % num_heads == 0, (
@@ -109,24 +106,6 @@ class LatentModel(nn.Module):
             decoder_x = t.cat([target_x, min_dist], dim=-1)
         dist, mu, sigma = self.decoder(representation, decoder_x)
 
-        # Smoothness regularizer (training only)
-        smooth_loss = t.zeros((), device=target_x.device)
-        if (self.training and self.smoothness_weight > 0
-                and target_y is not None):
-            jitter = (t.randn_like(target_x)
-                      * self.smoothness_noise_scale)
-            decoder_x_jittered = decoder_x.clone()
-            decoder_x_jittered[..., :3] = target_x + jitter
-            _, mu_jittered, _ = self.decoder(
-                representation, decoder_x_jittered)
-            mse = (mu_jittered - mu).pow(2).sum(dim=-1)
-            if target_mask is not None:
-                mse = mse * target_mask.to(mse.dtype)
-                n_valid = target_mask.to(mse.dtype).sum(dim=1).clamp(min=1.0)
-                smooth_loss = (mse.sum(dim=1) / n_valid).mean()
-            else:
-                smooth_loss = mse.mean()
-
         if target_y is not None:
             log_p = dist.log_prob(target_y).sum(dim=-1)
             kl_per_dim = kl_divergence(posterior, prior)
@@ -148,7 +127,7 @@ class LatentModel(nn.Module):
 
             recon = -t.mean(log_p_sum / n_valid)
             kl_term = kl_weight * t.mean(kl_per_sample)
-            loss = recon + kl_term + self.smoothness_weight * smooth_loss
+            loss = recon + kl_term
         else:
             kl = None
             loss = None

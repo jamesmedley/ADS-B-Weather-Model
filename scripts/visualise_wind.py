@@ -18,42 +18,49 @@ import matplotlib.patheffects as pe
 
 from wind_map.infer import WindPredictor
 from wind_map.preprocess import (
-    CENTRE_LAT, CENTRE_LON, LAT_RANGE_DEG, LON_RANGE_DEG
+    load_params, KM_PER_DEG_LAT,
 )
 from wind_map.utils import (
     format_snapshot_time, lonlat_to_mercator, pick_snapshot,
     make_grid, wind_to_uv
 )
 
-KM_PER_DEG_LAT = 111.0
-KM_PER_DEG_LON = 111.0 * np.cos(np.radians(CENTRE_LAT))
-
 
 def plot_wind(checkpoint, alt_ft, context, n_samples,
               n_lat, n_lon, output,
               num_hidden, num_layers,
               snapshot_id=None, snapshot_time=None,
+              params=None,
               lat_range_deg=None, lon_range_deg=None):
     predictor = WindPredictor(
         checkpoint, num_hidden=num_hidden,
-        num_layers=num_layers)
+        num_layers=num_layers, params=params)
+
+    if params is not None:
+        default_lat_range = params.range_km / KM_PER_DEG_LAT
+        default_lon_range = params.range_km / params.km_per_deg_lon
+    else:
+        default_lat_range = 0.63
+        default_lon_range = 1.0
 
     eff_lat_range = (lat_range_deg if lat_range_deg is not None
-                     else LAT_RANGE_DEG)
+                     else default_lat_range)
     eff_lon_range = (lon_range_deg if lon_range_deg is not None
-                     else LON_RANGE_DEG)
+                     else default_lon_range)
 
-    if eff_lat_range > LAT_RANGE_DEG or eff_lon_range > LON_RANGE_DEG:
+    too_big = (eff_lat_range > 1.5 * default_lat_range
+               or eff_lon_range > 1.5 * default_lon_range)
+    if too_big:
         print(
             f"Warning: view (+-{eff_lat_range:.3f} lat "
             f"/ +-{eff_lon_range:.3f} lon) extends beyond "
-            f"training range (+-{LAT_RANGE_DEG} lat "
-            f"/ +-{LON_RANGE_DEG} lon). "
+            f"training range (+-{default_lat_range:.3f} lat "
+            f"/ +-{default_lon_range:.3f} lon). "
             f"Predictions outside that box are extrapolated.")
 
     # Main grid (arrows)
     queries, lat_grid, lon_grid, _, _ = make_grid(
-        alt_ft, n_lat, n_lon,
+        alt_ft, n_lat, n_lon, params=params,
         lat_range_deg=eff_lat_range, lon_range_deg=eff_lon_range)
     result = predictor.predict(context, queries, n_samples=n_samples)
 
@@ -63,7 +70,7 @@ def plot_wind(checkpoint, alt_ft, context, n_samples,
 
     # High-res grid (heatmap)
     heat_queries, heat_lat, heat_lon, _, _ = make_grid(
-        alt_ft, n_lat * 3, n_lon * 3,
+        alt_ft, n_lat * 3, n_lon * 3, params=params,
         lat_range_deg=eff_lat_range, lon_range_deg=eff_lon_range)
     heat_result = predictor.predict(context, heat_queries, n_samples=n_samples)
 
@@ -95,10 +102,12 @@ def plot_wind(checkpoint, alt_ft, context, n_samples,
     fig.patch.set_facecolor("#0d1b2a")
     ax.set_facecolor("#0d1b2a")
 
-    x_min, y_min = lonlat_to_mercator(CENTRE_LON - eff_lon_range,
-                                      CENTRE_LAT - eff_lat_range)
-    x_max, y_max = lonlat_to_mercator(CENTRE_LON + eff_lon_range,
-                                      CENTRE_LAT + eff_lat_range)
+    c_lat = params.centre_lat if params is not None else 51.071066
+    c_lon = params.centre_lon if params is not None else -1.042441
+    x_min, y_min = lonlat_to_mercator(c_lon - eff_lon_range,
+                                      c_lat - eff_lat_range)
+    x_max, y_max = lonlat_to_mercator(c_lon + eff_lon_range,
+                                      c_lat + eff_lat_range)
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
 
@@ -187,11 +196,14 @@ if __name__ == "__main__":
 
     args = p.parse_args()
 
+    params = None
     if args.cache:
         context, snapshot_time, sid = pick_snapshot(
             args.cache, snapshot_id=args.snapshot_id, split=args.split)
+        params = load_params(args.cache)
     else:
-        context = json.load(open(args.context_json))
+        with open(args.context_json) as f:
+            context = json.load(f)
         snapshot_time, sid = None, None
 
     lat_range_deg = args.lat_range_deg
@@ -199,8 +211,16 @@ if __name__ == "__main__":
     if args.radius_km is not None:
         if lat_range_deg is None:
             lat_range_deg = args.radius_km / KM_PER_DEG_LAT
-        if lon_range_deg is None:
-            lon_range_deg = args.radius_km / KM_PER_DEG_LON
+        if lon_range_deg is None and params is not None:
+            lon_range_deg = args.radius_km / params.km_per_deg_lon
+        elif lon_range_deg is None:
+            lon_range_deg = (args.radius_km
+                             / (111.0 * np.cos(np.radians(51.07))))
+
+    if lat_range_deg is None and params is not None:
+        lat_range_deg = params.range_km / KM_PER_DEG_LAT
+    if lon_range_deg is None and params is not None:
+        lon_range_deg = params.range_km / params.km_per_deg_lon
 
     plot_wind(
         checkpoint=args.checkpoint,
@@ -214,6 +234,7 @@ if __name__ == "__main__":
         num_layers=args.num_layers,
         snapshot_id=sid,
         snapshot_time=snapshot_time,
+        params=params,
         lat_range_deg=lat_range_deg,
         lon_range_deg=lon_range_deg,
     )

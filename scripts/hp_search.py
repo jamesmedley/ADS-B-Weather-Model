@@ -7,6 +7,7 @@ Usage:
 """
 
 import argparse
+import itertools
 
 from skopt import gp_minimize, dump
 from skopt.space import Real, Integer, Categorical
@@ -21,16 +22,14 @@ space = [
     Integer(1, 4),                      # layers
 ]
 
-n = 0
-
 
 def make_objective(cache_dir, search_epochs,
                    num_workers, split_seed,
                    warmup_frac, dropout, patience,
                    use_amp):
+    run_counter = itertools.count(1)
     def objective(params):
-        global n
-        n += 1
+        n = next(run_counter)
         print(f"Search Run {n}")
         lr, hidden, batch, layers = params
         lr = float(lr)

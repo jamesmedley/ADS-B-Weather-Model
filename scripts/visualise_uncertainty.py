@@ -34,7 +34,7 @@ from wind_map.infer import (
     queries_to_tensor, compute_uncertainty_components,
 )
 from wind_map.preprocess import (
-    WIND_SPEED_MEAN, WIND_SPEED_STD, day_grouped_split
+    NormParams, load_params, day_grouped_split
 )
 from wind_map.utils import (
     circular_mean, pick_snapshot,
@@ -45,9 +45,10 @@ from wind_map.utils import (
 # --- Model + tensor plumbing ---
 
 @torch.no_grad()
-def predict_components(model, context, queries, n_samples, device):
-    context_x, context_y = observations_to_tensors(context, device)
-    target_x = queries_to_tensor(queries, device)
+def predict_components(model, context, queries, n_samples, device,
+                       params: NormParams):
+    context_x, context_y = observations_to_tensors(context, device, params)
+    target_x = queries_to_tensor(queries, device, params)
 
     mu_samples, sigma_samples = [], []
     for _ in range(n_samples):
@@ -63,12 +64,14 @@ def predict_components(model, context, queries, n_samples, device):
     spd_mu = mu_stack[..., 2]
 
     sample_dirs = np.degrees(np.arctan2(sin_mu, cos_mu)) % 360
-    sample_speeds = np.clip(spd_mu, 0, None) * WIND_SPEED_STD + WIND_SPEED_MEAN
+    log_speed = spd_mu * params.log_speed_std + params.log_speed_mean
+    sample_speeds = np.exp(np.clip(log_speed, 0, None)) - 1
 
     mean_dirs = circular_mean(sample_dirs, axis=0)
     mean_speeds = sample_speeds.mean(axis=0)
 
-    components = compute_uncertainty_components(mu_stack, sigma_stack)
+    components = compute_uncertainty_components(
+        mu_stack, sigma_stack, params)
 
     return {
         'wind_dir_deg': mean_dirs,
@@ -89,19 +92,24 @@ def combined_unc(dir_std, speed_std, n_lat, n_lon):
     return 0.5 * (d / (d.max() + 1e-9) + s / (s.max() + 1e-9))
 
 
-def compute_single(model, context, alt_ft, n_samples, n_lat, n_lon, device):
-    queries, lat_grid, lon_grid, _, _ = make_grid(alt_ft, n_lat, n_lon)
-    result = predict_components(model, context, queries, n_samples, device)
+def compute_single(model, context, alt_ft, n_samples, n_lat, n_lon, device,
+                   params: NormParams):
+    queries, lat_grid, lon_grid, _, _ = make_grid(
+        alt_ft, n_lat, n_lon, params=params)
+    result = predict_components(
+        model, context, queries, n_samples, device, params)
     return result, lat_grid, lon_grid
 
 
 def compute_average(model, cache_dir, split, alt_ft, n_samples, n_lat, n_lon,
                     device, max_snapshots=None):
+    params = load_params(cache_dir)
     ids = split_snapshot_ids(cache_dir, split)
     if max_snapshots is not None:
         ids = ids[:max_snapshots]
 
-    queries, lat_grid, lon_grid, _, _ = make_grid(alt_ft, n_lat, n_lon)
+    queries, lat_grid, lon_grid, _, _ = make_grid(
+        alt_ft, n_lat, n_lon, params=params)
 
     sums = None
     n_used = 0
@@ -112,7 +120,8 @@ def compute_average(model, cache_dir, split, alt_ft, n_samples, n_lat, n_lon,
         if len(obs) < 2:
             continue
 
-        result = predict_components(model, obs, queries, n_samples, device)
+        result = predict_components(
+            model, obs, queries, n_samples, device, params)
         if sums is None:
             sums = {k: np.zeros_like(v) for k, v in result.items()
                     if isinstance(v, np.ndarray)}
@@ -208,7 +217,7 @@ if __name__ == "__main__":
         default="outputs/imgs/uncertainty_components.png")
     p.add_argument("--hidden", type=int, default=128)
     p.add_argument("--num_layers", type=int, default=4)
-    p.add_argument("--samples", type=int, default=1000)
+    p.add_argument("--samples", type=int, default=100)
     p.add_argument("--grid_lat", type=int, default=25)
     p.add_argument("--grid_lon", type=int, default=25)
 
@@ -246,16 +255,19 @@ if __name__ == "__main__":
                         all_context_lat=result['all_context_lat'],
                         all_context_lon=result['all_context_lon'])
     else:
+        params = None
         if args.cache:
             context, snapshot_time, sid = pick_snapshot(
                 args.cache, snapshot_id=args.snapshot_id, split=args.split)
+            params = load_params(args.cache)
         else:
-            context = json.load(open(args.context_json))
+            with open(args.context_json) as f:
+                context = json.load(f)
             snapshot_time, sid = None, None
 
         result, lat_grid, lon_grid = compute_single(
             model, context, args.alt_ft, args.samples, args.grid_lat,
-            args.grid_lon, device)
+            args.grid_lon, device, params=params)
         plot_components(result, lat_grid, lon_grid, args.alt_ft, args.grid_lat,
                         args.grid_lon, args.output, context=context,
                         snapshot_time=snapshot_time, snapshot_id=sid)

@@ -21,6 +21,7 @@ Usage:
 
 import os
 import json
+import math
 import time
 import sqlite3
 import argparse
@@ -28,8 +29,7 @@ import numpy as np
 
 from wind_map.preprocess import (
     normalise_coords, encode_wind, MIN_AIRCRAFT,
-    CENTRE_LAT, CENTRE_LON, LAT_RANGE_DEG, LON_RANGE_DEG,
-    MAX_ALT_FT,
+    NormParams, KM_PER_DEG_LAT,
 )
 
 
@@ -89,10 +89,40 @@ def convert(db_path, out_dir, min_aircraft=MIN_AIRCRAFT):
     rows_by_snapshot = _all_valid_rows_by_snapshot(con)
     con.close()
 
+    # --- Compute data-driven normalisation parameters ---
+    all_rows = [
+        row for rows in rows_by_snapshot.values() for row in rows
+    ]
+    all_arr = np.array(all_rows, dtype=np.float64)
+    all_lats = all_arr[:, 0]
+    all_lons = all_arr[:, 1]
+    all_alts = all_arr[:, 2]
+    all_ws = all_arr[:, 4]
+
+    centre_lat = float(np.median(all_lats))
+    centre_lon = float(np.median(all_lons))
+    km_per_deg_lon = 111.0 * math.cos(math.radians(centre_lat))
+    lat_km = (all_lats - centre_lat) * KM_PER_DEG_LAT
+    lon_km = (all_lons - centre_lon) * km_per_deg_lon
+    distances_km = np.sqrt(lat_km ** 2 + lon_km ** 2)
+    range_km = float(np.percentile(distances_km, 99))
+    max_alt_ft = float(np.percentile(all_alts, 99))
+    log_speeds = np.log(1 + all_ws)
+    params = NormParams(
+        centre_lat=centre_lat,
+        centre_lon=centre_lon,
+        range_km=range_km,
+        max_alt_ft=max_alt_ft,
+        wind_speed_mean_kt=float(all_ws.mean()),
+        wind_speed_std_kt=float(all_ws.std()),
+        log_speed_mean=float(log_speeds.mean()),
+        log_speed_std=float(log_speeds.std()),
+    )
+
+    # --- Normalise and write ---
     x_chunks, y_chunks = [], []
     offsets = np.zeros(len(snapshot_ids) + 1, dtype=np.int64)
     total_rows = 0
-    all_wind_speeds = []
 
     for i, sid in enumerate(snapshot_ids):
         rows = rows_by_snapshot.get(sid, [])
@@ -100,11 +130,12 @@ def convert(db_path, out_dir, min_aircraft=MIN_AIRCRAFT):
             xs = np.empty((len(rows), 3), dtype=np.float32)
             ys = np.empty((len(rows), 3), dtype=np.float32)
             for j, (lat, lon, alt_ft, wind_dir, wind_speed) in enumerate(rows):
-                lat_n, lon_n, alt_n = normalise_coords(lat, lon, alt_ft)
-                sin_w, cos_w, spd_n = encode_wind(wind_dir, wind_speed)
+                lat_n, lon_n, alt_n = normalise_coords(
+                    lat, lon, alt_ft, params)
+                sin_w, cos_w, spd_n = encode_wind(
+                    wind_dir, wind_speed, params)
                 xs[j] = (lat_n, lon_n, alt_n)
                 ys[j] = (sin_w, cos_w, spd_n)
-                all_wind_speeds.append(wind_speed)
             x_chunks.append(xs)
             y_chunks.append(ys)
             total_rows += len(rows)
@@ -121,8 +152,6 @@ def convert(db_path, out_dir, min_aircraft=MIN_AIRCRAFT):
         else np.empty((0, 3), dtype=np.float32)
     )
     snapshot_ids_arr = np.asarray(snapshot_ids, dtype=np.int64)
-    # Stringify snapshot_time and store as fixed-width
-    # unicode (no allow_pickle needed)
     snapshot_times_arr = np.asarray(
         [str(t) for t in snapshot_times], dtype='<U32'
     )
@@ -134,24 +163,13 @@ def convert(db_path, out_dir, min_aircraft=MIN_AIRCRAFT):
     np.save(os.path.join(out_dir, 'offsets.npy'), offsets)
 
     empty_snapshots = int(np.sum(np.diff(offsets) == 0))
-    wind_speeds_arr = np.array(all_wind_speeds)
-    computed_mean = float(wind_speeds_arr.mean())
-    computed_std = float(wind_speeds_arr.std())
     meta = {
         'source_db': os.path.abspath(db_path),
         'min_aircraft': min_aircraft,
         'num_snapshots': len(snapshot_ids),
         'num_empty_snapshots': empty_snapshots,
         'num_observations': int(total_rows),
-        'normalisation': {
-            'centre_lat': CENTRE_LAT,
-            'centre_lon': CENTRE_LON,
-            'lat_range_deg': LAT_RANGE_DEG,
-            'lon_range_deg': LON_RANGE_DEG,
-            'max_alt_ft': MAX_ALT_FT,
-            'wind_speed_mean_kt': computed_mean,
-            'wind_speed_std_kt': computed_std,
-        },
+        'normalisation': params.to_dict(),
         'created': time.strftime('%Y-%m-%d %H:%M:%S'),
     }
     with open(os.path.join(out_dir, 'meta.json'), 'w') as f:
@@ -160,8 +178,12 @@ def convert(db_path, out_dir, min_aircraft=MIN_AIRCRAFT):
     dt = time.time() - t0
     print(f"  {len(snapshot_ids)} snapshots  ({empty_snapshots} empty)")
     print(f"  {total_rows} observations written")
-    print(f"  wind speed stats: mean={computed_mean:.2f} kt"
-          f"  std={computed_std:.2f} kt")
+    print(f"  centre: ({centre_lat:.4f}, {centre_lon:.4f})  "
+          f"range_km: {range_km:.1f}  max_alt: {max_alt_ft:.0f} ft")
+    print(f"  wind speed: mean={params.wind_speed_mean_kt:.2f} kt  "
+          f"std={params.wind_speed_std_kt:.2f} kt")
+    print(f"  log speed: mean={params.log_speed_mean:.4f}  "
+          f"std={params.log_speed_std:.4f}")
     print(f"  cache written to {out_dir}/ in {dt:.1f}s")
     print(
         f"    x.npy: {x_all.shape} {x_all.dtype}"

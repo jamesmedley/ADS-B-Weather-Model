@@ -17,6 +17,7 @@ from wind_map.network import LatentModel
 from wind_map.preprocess import (
     WindSnapshotDataset, day_grouped_split,
     collate_fn, collate_fn_val, _worker_init,
+    load_params,
 )
 from torch.utils.data import DataLoader
 
@@ -105,8 +106,6 @@ def train(cache_dir, num_hidden=128, epochs=200,
           weight_decay=1e-5,
           use_nearest_dist=True,
           use_dist_bias=True,
-          smoothness_weight=1.0,
-          smoothness_noise_scale=0.05,
           num_decoder_layers=3):
     """
     Train the Wind ANP.
@@ -160,6 +159,9 @@ def train(cache_dir, num_hidden=128, epochs=200,
         worker_init_fn=_worker_init,
         pin_memory=(device.type == 'cuda'))
 
+    # --- Normalisation params (saved in checkpoint for inference) ---
+    norm_params = load_params(cache_dir)
+
     # --- Model ---
     model = LatentModel(
         num_hidden, x_dim=3, y_dim=3,
@@ -168,8 +170,6 @@ def train(cache_dir, num_hidden=128, epochs=200,
         free_bits=free_bits,
         use_nearest_dist=use_nearest_dist,
         use_dist_bias=use_dist_bias,
-        smoothness_weight=smoothness_weight,
-        smoothness_noise_scale=smoothness_noise_scale,
         num_decoder_layers=num_decoder_layers).to(device)
 
     if init_checkpoint is not None:
@@ -192,17 +192,15 @@ def train(cache_dir, num_hidden=128, epochs=200,
 
     # AMP setup
     if use_amp and device.type == 'cuda':
-        try:
-            bf16_ok = t.cuda.is_bf16_supported()
-        except AttributeError:
-            bf16_ok = False
-        if bf16_ok:
+        cc = t.cuda.get_device_capability()
+        if cc >= (8, 0):  # Ampere+: native bf16 tensor cores
             amp_dtype = t.bfloat16
-        else:
+            scaler = None
+        else:              # Turing/Volta: fp16 tensor cores + GradScaler
             amp_dtype = t.float16
-        scaler = t.cuda.amp.GradScaler()
+            scaler = t.amp.GradScaler()
         if verbose:
-            print(f"  AMP enabled (dtype={amp_dtype})")
+            print(f"  AMP enabled (dtype={amp_dtype}, sm_{cc[0]}{cc[1]})")
     else:
         amp_dtype = None
         scaler = None
@@ -366,6 +364,7 @@ def train(cache_dir, num_hidden=128, epochs=200,
                     },
                     'scheduler': scheduler.state_dict(),
                     'val_loss': avg_val,
+                    'norm_params': norm_params.to_dict(),
                     'hparams': {
                         'num_hidden': num_hidden,
                         'num_layers': num_layers,
@@ -378,8 +377,6 @@ def train(cache_dir, num_hidden=128, epochs=200,
                         'weight_decay': weight_decay,
                         'use_nearest_dist': use_nearest_dist,
                         'use_dist_bias': use_dist_bias,
-                        'smoothness_weight': smoothness_weight,
-                        'smoothness_noise_scale': smoothness_noise_scale,
                         'num_decoder_layers': num_decoder_layers,
                     },
                 }
@@ -435,7 +432,6 @@ def train(cache_dir, num_hidden=128, epochs=200,
             model.load_state_dict(best_state_dict)
         model.eval()
         test_loss_sum = 0.0
-        non_blocking = (device.type == 'cuda')
         with t.no_grad():
             for batch in test_loader:
                 (context_x, context_y,

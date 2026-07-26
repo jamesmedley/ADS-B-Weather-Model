@@ -41,13 +41,11 @@ from scipy.interpolate import RegularGridInterpolator  # noqa: E402
 
 from wind_map.infer import WindPredictor  # noqa: E402
 from wind_map.preprocess import (  # noqa: E402
-    CENTRE_LAT, CENTRE_LON, LAT_RANGE_DEG, LON_RANGE_DEG)
+    load_params, KM_PER_DEG_LAT)
 from wind_map.utils import (  # noqa: E402
     format_snapshot_time, lonlat_to_mercator, pick_snapshot,
     make_grid, wind_to_uv)
 
-KM_PER_DEG_LAT = 111.0
-KM_PER_DEG_LON = 111.0 * np.cos(np.radians(CENTRE_LAT))
 KT_TO_KM_PER_S = 1.852 / 3600.0
 
 
@@ -60,7 +58,8 @@ class ParticleSwarm:
 
     def __init__(self, n_particles, lat_bounds, lon_bounds,
                  u_interp, v_interp, unc_interp, rng,
-                 max_age_frames=60, trail_len=8):
+                 max_age_frames=60, trail_len=8,
+                 km_per_deg_lon=69.4):
         self.n = n_particles
         self.lat_bounds = lat_bounds
         self.lon_bounds = lon_bounds
@@ -70,6 +69,7 @@ class ParticleSwarm:
         self.rng = rng
         self.max_age_frames = max_age_frames
         self.trail_len = trail_len
+        self.km_per_deg_lon = km_per_deg_lon
 
         self.lat = rng.uniform(*lat_bounds, size=n_particles)
         self.lon = rng.uniform(*lon_bounds, size=n_particles)
@@ -101,7 +101,7 @@ class ParticleSwarm:
         v_kt = self.v_interp(pts)
 
         dlat = (v_kt * KT_TO_KM_PER_S * dt_seconds) / KM_PER_DEG_LAT
-        dlon = (u_kt * KT_TO_KM_PER_S * dt_seconds) / KM_PER_DEG_LON
+        dlon = (u_kt * KT_TO_KM_PER_S * dt_seconds) / self.km_per_deg_lon
 
         self.lat = self.lat + dlat
         self.lon = self.lon + dlon
@@ -135,17 +135,27 @@ def build_wind_gif(checkpoint, alt_ft, context, n_samples,
                    num_hidden, num_layers,
                    n_particles, n_frames, fps, dt_seconds, trail_len,
                    snapshot_id=None, snapshot_time=None,
+                   params=None,
                    lat_range_deg=None, lon_range_deg=None, seed=0):
     predictor = WindPredictor(
         checkpoint, num_hidden=num_hidden,
-        num_layers=num_layers)
+        num_layers=num_layers, params=params)
+
+    if params is not None:
+        default_lat_range = params.range_km / KM_PER_DEG_LAT
+        default_lon_range = params.range_km / params.km_per_deg_lon
+    else:
+        default_lat_range = 0.63
+        default_lon_range = 1.0
 
     eff_lat_range = (lat_range_deg if lat_range_deg is not None
-                     else LAT_RANGE_DEG)
+                     else default_lat_range)
     eff_lon_range = (lon_range_deg if lon_range_deg is not None
-                     else LON_RANGE_DEG)
+                     else default_lon_range)
 
-    if eff_lat_range > LAT_RANGE_DEG or eff_lon_range > LON_RANGE_DEG:
+    too_big = (eff_lat_range > 1.5 * default_lat_range
+               or eff_lon_range > 1.5 * default_lon_range)
+    if too_big:
         print(
             f"Warning: view (+-{eff_lat_range:.3f} lat "
             f"/ +-{eff_lon_range:.3f} lon) extends beyond "
@@ -153,7 +163,8 @@ def build_wind_gif(checkpoint, alt_ft, context, n_samples,
 
     # Single grid prediction for wind + uncertainty fields
     queries, lat_grid, lon_grid, lat_axis, lon_axis = make_grid(
-        alt_ft, n_lat, n_lon, eff_lat_range, eff_lon_range)
+        alt_ft, n_lat, n_lon, params=params,
+        lat_range_deg=eff_lat_range, lon_range_deg=eff_lon_range)
     result = predictor.predict(context, queries, n_samples=n_samples)
 
     dirs = result["wind_dir_deg"].reshape(n_lat, n_lon)
@@ -178,10 +189,12 @@ def build_wind_gif(checkpoint, alt_ft, context, n_samples,
     lon_bounds = (lon_axis.min(), lon_axis.max())
 
     rng = np.random.default_rng(seed)
+    km_pdl = params.km_per_deg_lon if params is not None else 69.4
     swarm = ParticleSwarm(n_particles, lat_bounds, lon_bounds,
                           u_interp, v_interp, unc_interp, rng,
                           max_age_frames=max(30, n_frames // 2),
-                          trail_len=trail_len)
+                          trail_len=trail_len,
+                          km_per_deg_lon=km_pdl)
 
     # Precompute forward-only trajectory buffer, then loop
     # via per-particle phase offsets
@@ -207,10 +220,12 @@ def build_wind_gif(checkpoint, alt_ft, context, n_samples,
     fig.patch.set_facecolor("#0d1b2a")
     ax.set_facecolor("#0d1b2a")
 
-    x_min, y_min = lonlat_to_mercator(CENTRE_LON - eff_lon_range,
-                                      CENTRE_LAT - eff_lat_range)
-    x_max, y_max = lonlat_to_mercator(CENTRE_LON + eff_lon_range,
-                                      CENTRE_LAT + eff_lat_range)
+    c_lat = params.centre_lat if params is not None else 51.071066
+    c_lon = params.centre_lon if params is not None else -1.042441
+    x_min, y_min = lonlat_to_mercator(c_lon - eff_lon_range,
+                                      c_lat - eff_lat_range)
+    x_max, y_max = lonlat_to_mercator(c_lon + eff_lon_range,
+                                      c_lat + eff_lat_range)
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
     ax.set_axis_off()
@@ -362,11 +377,14 @@ if __name__ == "__main__":
 
     args = p.parse_args()
 
+    params = None
     if args.cache:
         context, snapshot_time, sid = pick_snapshot(
             args.cache, snapshot_id=args.snapshot_id, split=args.split)
+        params = load_params(args.cache)
     else:
-        context = json.load(open(args.context_json))
+        with open(args.context_json) as f:
+            context = json.load(f)
         snapshot_time, sid = None, None
 
     lat_range_deg = args.lat_range_deg
@@ -374,8 +392,16 @@ if __name__ == "__main__":
     if args.radius_km is not None:
         if lat_range_deg is None:
             lat_range_deg = args.radius_km / KM_PER_DEG_LAT
-        if lon_range_deg is None:
-            lon_range_deg = args.radius_km / KM_PER_DEG_LON
+        if lon_range_deg is None and params is not None:
+            lon_range_deg = args.radius_km / params.km_per_deg_lon
+        elif lon_range_deg is None:
+            lon_range_deg = (args.radius_km
+                             / (111.0 * np.cos(np.radians(51.07))))
+
+    if lat_range_deg is None and params is not None:
+        lat_range_deg = params.range_km / KM_PER_DEG_LAT
+    if lon_range_deg is None and params is not None:
+        lon_range_deg = params.range_km / params.km_per_deg_lon
 
     build_wind_gif(
         checkpoint=args.checkpoint,
@@ -394,6 +420,7 @@ if __name__ == "__main__":
         trail_len=args.trail_len,
         snapshot_id=sid,
         snapshot_time=snapshot_time,
+        params=params,
         lat_range_deg=lat_range_deg,
         lon_range_deg=lon_range_deg,
         seed=args.seed,

@@ -22,49 +22,9 @@ from torch.utils.data import DataLoader
 
 from wind_map.infer import load_model_checkpoint
 from wind_map.preprocess import (
-    WindSnapshotDataset, day_grouped_split, pad_batch,
-    WIND_SPEED_MEAN, WIND_SPEED_STD,
+    WindSnapshotDataset, day_grouped_split,
+    load_params, collate_fn_val,
 )
-
-
-# --- Context / held-out-target collate ---
-
-def eval_collate_fn(batch, context_frac=0.5):
-    """
-    Like preprocess.collate_fn, but target = complement of context (true
-    held-out points). No augmentation. Zero-pads with bool masks.
-    """
-    context_xs, context_ys, target_xs, target_ys = [], [], [], []
-    ctx_lens, tgt_lens = [], []
-
-    for (x, y) in batch:
-        n = x.size(0)
-        if n < 2:
-            continue
-
-        n_ctx = max(1, min(int(n * context_frac), n - 1))
-        perm = t.randperm(n)
-        ctx_idx = perm[:n_ctx]
-        held_idx = perm[n_ctx:]
-        if held_idx.numel() == 0:
-            continue
-
-        context_xs.append(x[ctx_idx])
-        context_ys.append(y[ctx_idx])
-        target_xs.append(x[held_idx])
-        target_ys.append(y[held_idx])
-
-        ctx_lens.append(n_ctx)
-        tgt_lens.append(held_idx.numel())
-
-    if not context_xs:
-        raise RuntimeError(
-            "Empty batch — every item had too few"
-            " observations to split."
-        )
-
-    return pad_batch(
-        context_xs, context_ys, target_xs, target_ys, ctx_lens, tgt_lens)
 
 
 def _circular_abs_diff_deg(a, b):
@@ -90,6 +50,8 @@ def evaluate(checkpoint_path, cache_dir, split='test', num_hidden=None,
     model, ckpt = load_model_checkpoint(checkpoint_path, device, num_hidden,
                                         num_layers, dropout)
 
+    params = load_params(cache_dir)
+
     train_ids, val_ids, test_ids = day_grouped_split(
         cache_dir, seed=split_seed
     )
@@ -101,12 +63,13 @@ def evaluate(checkpoint_path, cache_dir, split='test', num_hidden=None,
     t.manual_seed(eval_seed)
     loader = DataLoader(
         ds, batch_size=batch_size, shuffle=False, num_workers=0,
-        collate_fn=lambda b: eval_collate_fn(b, context_frac=context_frac))
+        collate_fn=lambda b: collate_fn_val(b, context_frac=context_frac))
 
     nll_sum, nll_count = 0.0, 0
     abs_speed_err_sum, sq_speed_err_sum = 0.0, 0.0
     dir_err_sum = 0.0
-    cov68_sum, cov95_sum = 0.0, 0.0
+    cov68_dir_sum, cov95_dir_sum = 0.0, 0.0
+    cov68_spd_sum, cov95_spd_sum = 0.0, 0.0
     n_snapshots = 0
 
     for (context_x, context_y, target_x,
@@ -153,14 +116,18 @@ def evaluate(checkpoint_path, cache_dir, split='test', num_hidden=None,
                 mean_mu_np[..., 0], mean_mu_np[..., 1]
             )
         ) % 360
-        pred_speed = mean_mu_np[..., 2] * WIND_SPEED_STD + WIND_SPEED_MEAN
+        pred_log_speed = (mean_mu_np[..., 2] * params.log_speed_std
+                          + params.log_speed_mean)
+        pred_speed = np.exp(pred_log_speed) - 1
         true_dir = np.degrees(
             np.arctan2(
                 target_y_np[..., 0],
                 target_y_np[..., 1]
             )
         ) % 360
-        true_speed = target_y_np[..., 2] * WIND_SPEED_STD + WIND_SPEED_MEAN
+        true_log_speed = (target_y_np[..., 2] * params.log_speed_std
+                          + params.log_speed_mean)
+        true_speed = np.exp(true_log_speed) - 1
 
         speed_err = pred_speed - true_speed
         dir_err = _circular_abs_diff_deg(pred_dir, true_dir)
@@ -169,13 +136,30 @@ def evaluate(checkpoint_path, cache_dir, split='test', num_hidden=None,
         sq_speed_err_sum += (speed_err[mask_np] ** 2).sum()
         dir_err_sum += dir_err[mask_np].sum()
 
-        # Raw-space coverage (elementwise on
-        # sin/cos/speed_norm, averaged over 3 dims)
-        abs_err = np.abs(mean_mu_np - target_y_np)
-        within_1s = (abs_err <= total_std_np).mean(axis=-1)
-        within_2s = (abs_err <= 2 * total_std_np).mean(axis=-1)
-        cov68_sum += within_1s[mask_np].sum()
-        cov95_sum += within_2s[mask_np].sum()
+        # Physical-space coverage: direction (circular) and speed (linear)
+        # using delta-method uncertainty conversion.
+        sin_mu = mean_mu_np[..., 0]
+        cos_mu = mean_mu_np[..., 1]
+        R2 = sin_mu**2 + cos_mu**2 + 1e-9
+        var_dir_rad = ((cos_mu / R2) * total_std_np[..., 0])**2 \
+                      + ((sin_mu / R2) * total_std_np[..., 1])**2
+        std_dir_deg = np.degrees(np.sqrt(var_dir_rad))
+
+        log_speed_pred = (mean_mu_np[..., 2] * params.log_speed_std
+                          + params.log_speed_mean)
+        std_speed_kt = (total_std_np[..., 2] * params.log_speed_std
+                        * np.exp(log_speed_pred))
+
+        m = mask_np
+        dir_within_1s = dir_err[m] <= std_dir_deg[m]
+        dir_within_2s = dir_err[m] <= 2 * std_dir_deg[m]
+        spd_within_1s = np.abs(speed_err[m]) <= std_speed_kt[m]
+        spd_within_2s = np.abs(speed_err[m]) <= 2 * std_speed_kt[m]
+
+        cov68_dir_sum += dir_within_1s.sum()
+        cov95_dir_sum += dir_within_2s.sum()
+        cov68_spd_sum += spd_within_1s.sum()
+        cov95_spd_sum += spd_within_2s.sum()
 
         n_snapshots += context_x.size(0)
 
@@ -184,8 +168,14 @@ def evaluate(checkpoint_path, cache_dir, split='test', num_hidden=None,
         'wind_speed_mae_kt': float(abs_speed_err_sum / nll_count),
         'wind_speed_rmse_kt': float(math.sqrt(sq_speed_err_sum / nll_count)),
         'wind_dir_mae_deg': float(dir_err_sum / nll_count),
-        'coverage_68': float(cov68_sum / nll_count),
-        'coverage_95': float(cov95_sum / nll_count),
+        'coverage_68_dir': float(cov68_dir_sum / nll_count),
+        'coverage_95_dir': float(cov95_dir_sum / nll_count),
+        'coverage_68_speed': float(cov68_spd_sum / nll_count),
+        'coverage_95_speed': float(cov95_spd_sum / nll_count),
+        'coverage_68': float((cov68_dir_sum + cov68_spd_sum)
+                             / (2 * nll_count)),
+        'coverage_95': float((cov95_dir_sum + cov95_spd_sum)
+                             / (2 * nll_count)),
         'n_snapshots': int(n_snapshots),
         'n_held_out_points': int(nll_count),
         'split': split,

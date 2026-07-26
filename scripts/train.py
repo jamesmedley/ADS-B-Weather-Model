@@ -23,7 +23,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--hidden', type=int, default=128)
     parser.add_argument(
-        '--batch', type=int, default=256)
+        '--batch', type=int, default=512)
     parser.add_argument(
         '--workers', type=int, default=4)
     parser.add_argument(
@@ -71,13 +71,6 @@ if __name__ == '__main__':
     parser.add_argument(
         '--no-dist-bias', action='store_true',
         help='Disable distance bias in cross-attention')
-    parser.add_argument(
-        '--smoothness-weight', type=float, default=1.0,
-        help='Smoothness regularizer weight (default: 1.0)')
-    parser.add_argument(
-        '--smoothness-noise-scale', type=float, default=0.02,
-        help='Jitter noise std for smoothness regularizer (default: 0.02)')
-
     args = parser.parse_args()
 
     train(
@@ -101,6 +94,4 @@ if __name__ == '__main__':
         weight_decay=args.weight_decay,
         use_nearest_dist=not args.no_nearest_dist,
         use_dist_bias=not args.no_dist_bias,
-        smoothness_weight=args.smoothness_weight,
-        smoothness_noise_scale=args.smoothness_noise_scale,
     )

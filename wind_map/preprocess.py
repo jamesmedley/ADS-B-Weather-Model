@@ -3,11 +3,12 @@ preprocess.py — Data loading and normalisation for the Wind ANP.
 
 Reads from the flat .npy cache built by convert_db.py.
 
-Coordinate normalisation:
-  lat/lon : centred and scaled to ~[-1, 1] over the service area
-  altitude: divided by 50,000 ft -> [0, 1]
+Normalisation (data-driven, stored in meta.json):
+  lat/lon : converted to local km coordinates, centred at dataset
+            median, scaled to ~[-1, 1] by isotropic range_km
+  altitude: log(1 + ft) / log(1 + max_alt_ft)  ->  [0, ~1]
   wind_dir: encoded as (sin, cos) to handle circularity
-  wind_speed: z-score normalised (mean 0, std 1) over dataset
+  wind_speed: log(1 + kt), then z-scored
 
 Network input x  -> [lat_norm, lon_norm, alt_norm]          (dim=3)
 Network output y -> [wind_dir_sin, wind_dir_cos, speed_norm] (dim=3)
@@ -15,55 +16,133 @@ Network output y -> [wind_dir_sin, wind_dir_cos, speed_norm] (dim=3)
 
 import os
 import math
+import json
+import dataclasses
 import numpy as np
 import torch
 from datetime import datetime
 from torch.utils.data import Dataset, DataLoader
 
-# --- Normalisation constants (tune to your area) ---
+
+# --- Data-driven normalisation parameters ---
+
+KM_PER_DEG_LAT = 111.0  # nearly constant at all latitudes
+
+
+@dataclasses.dataclass
+class NormParams:
+    """Data-driven normalisation parameters, computed by convert_db.py."""
+    centre_lat: float
+    centre_lon: float
+    range_km: float          # isotropic half-width, km (99th %ile)
+    max_alt_ft: float        # 99th percentile altitude
+    wind_speed_mean_kt: float
+    wind_speed_std_kt: float
+    log_speed_mean: float    # mean of log(1 + wind_speed_kt)
+    log_speed_std: float     # std  of log(1 + wind_speed_kt)
+
+    @property
+    def km_per_deg_lon(self) -> float:
+        return 111.0 * math.cos(math.radians(self.centre_lat))
+
+    @classmethod
+    def from_meta(cls, meta_path: str) -> "NormParams":
+        with open(meta_path) as f:
+            meta = json.load(f)
+        n = meta["normalisation"]
+        return cls(
+            centre_lat=n["centre_lat"],
+            centre_lon=n["centre_lon"],
+            range_km=n["range_km"],
+            max_alt_ft=n["max_alt_ft"],
+            wind_speed_mean_kt=n["wind_speed_kt_mean"],
+            wind_speed_std_kt=n["wind_speed_kt_std"],
+            log_speed_mean=n["log_speed_mean"],
+            log_speed_std=n["log_speed_std"],
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "centre_lat": self.centre_lat,
+            "centre_lon": self.centre_lon,
+            "range_km": self.range_km,
+            "max_alt_ft": self.max_alt_ft,
+            "wind_speed_kt_mean": self.wind_speed_mean_kt,
+            "wind_speed_kt_std": self.wind_speed_std_kt,
+            "log_speed_mean": self.log_speed_mean,
+            "log_speed_std": self.log_speed_std,
+        }
+
+
+def load_params(cache_dir: str) -> NormParams:
+    """Load NormParams from npy_cache/meta.json."""
+    return NormParams.from_meta(os.path.join(cache_dir, "meta.json"))
+
+
+# --- Legacy hardcoded defaults (used only when meta.json is unavailable) ---
 
 CENTRE_LAT = 51.071066
 CENTRE_LON = -1.042441
-
 MAX_ALT_FT = 50_000.0
-WIND_SPEED_MEAN = 34.95125809377175  # computed by convert_db.py
-WIND_SPEED_STD = 21.849448514436578  # computed by convert_db.py
+WIND_SPEED_MEAN = 34.95125809377175
+WIND_SPEED_STD = 21.849448514436578
 MIN_AIRCRAFT = 2
-
-# Half-width of the service area in degrees (~70km radius)
 LAT_RANGE_DEG = 0.63
 LON_RANGE_DEG = 1.00
+
+LEGACY_PARAMS = NormParams(
+    centre_lat=CENTRE_LAT,
+    centre_lon=CENTRE_LON,
+    range_km=math.sqrt(
+        (LAT_RANGE_DEG * KM_PER_DEG_LAT) ** 2 +
+        (LON_RANGE_DEG * 111.0 * math.cos(math.radians(CENTRE_LON))) ** 2
+    ),
+    max_alt_ft=MAX_ALT_FT,
+    wind_speed_mean_kt=WIND_SPEED_MEAN,
+    wind_speed_std_kt=WIND_SPEED_STD,
+    log_speed_mean=math.log(1 + WIND_SPEED_MEAN),  # approximate
+    log_speed_std=WIND_SPEED_STD / (1 + WIND_SPEED_MEAN),  # delta approx
+)
 
 
 # --- Feature engineering ---
 
-def normalise_coords(lat, lon, alt_ft):
-    """Normalise spatial coords to approximately [-1, 1]."""
-    lat_n = (lat - CENTRE_LAT) / LAT_RANGE_DEG
-    lon_n = (lon - CENTRE_LON) / LON_RANGE_DEG
-    alt_n = alt_ft / MAX_ALT_FT
+def normalise_coords(lat, lon, alt_ft, params: NormParams):
+    """Normalise spatial coords to isotropic ~[-1, 1] in km.
+
+    Converts lat/lon to local km coordinates centred at params.centre,
+    then divides by the isotropic range_km. Altitude uses log scaling
+    to expand the boundary-layer range.
+    """
+    lat_km = (lat - params.centre_lat) * KM_PER_DEG_LAT
+    lon_km = (lon - params.centre_lon) * params.km_per_deg_lon
+    lat_n = lat_km / params.range_km
+    lon_n = lon_km / params.range_km
+    alt_n = math.log(1 + alt_ft) / math.log(1 + params.max_alt_ft)
     return lat_n, lon_n, alt_n
 
 
-def encode_wind(wind_dir_deg, wind_speed_kt):
-    """Encode wind direction circularly and normalise speed.
+def encode_wind(wind_dir_deg, wind_speed_kt, params: NormParams):
+    """Encode wind direction circularly and log-normalise speed.
 
     Returns (sin, cos, speed_norm).
     """
     rad = math.radians(wind_dir_deg)
+    log_speed = math.log(1 + wind_speed_kt)
+    speed_norm = (log_speed - params.log_speed_mean) / params.log_speed_std
     return (
-        math.sin(rad), math.cos(rad),
-        (wind_speed_kt - WIND_SPEED_MEAN) / WIND_SPEED_STD
+        math.sin(rad), math.cos(rad), speed_norm
     )
 
 
-def decode_wind(sin_val, cos_val, speed_norm):
+def decode_wind(sin_val, cos_val, speed_norm, params: NormParams):
     """Inverse of encode_wind.
 
     Returns (wind_dir_deg [0,360), wind_speed_kt).
     """
     deg = math.degrees(math.atan2(sin_val, cos_val)) % 360
-    speed = speed_norm * WIND_SPEED_STD + WIND_SPEED_MEAN
+    log_speed = speed_norm * params.log_speed_std + params.log_speed_mean
+    speed = math.exp(log_speed) - 1
     return deg, speed
 
 
@@ -268,25 +347,49 @@ class WindSnapshotDataset(Dataset):
         self._ensure_loaded()
         start, end = self._ranges[idx]
         x = torch.from_numpy(
-            self._x[start:end].copy().astype(np.float32))
+            self._x[start:end].copy())
         y = torch.from_numpy(
-            self._y[start:end].copy().astype(np.float32))
+            self._y[start:end].copy())
         return x, y
 
 
 # --- Collate ---
 
 def _rotate_wind(y, cos_a, sin_a):
-    """Rotate the (sin, cos) wind-direction components.
+    """Rotate wind vectors by angle `a` CCW using (sin, cos) encoding.
 
-    cos_a and sin_a can be scalars or tensors broadcastable
-    with y.
+    Applies the standard 2D rotation matrix to the (sin, cos) components
+    that encode meteorological wind direction (direction wind comes FROM):
+      new_sin = sin*cos(a) + cos*sin(a)   = sin(phi + a)
+      new_cos = cos*cos(a) - sin*sin(a)   = cos(phi + a)
+    This rotates the physical wind vector by `a` counter-clockwise, which
+    adds `a` to the meteorological direction. The rotation is a valid data
+    augmentation because wind direction is circular.
+
+    cos_a and sin_a can be scalars or tensors broadcastable with y.
     """
     y_rot = y.clone()
     s, c = y[..., 0], y[..., 1]
     y_rot[..., 0] = s * cos_a + c * sin_a
     y_rot[..., 1] = c * cos_a - s * sin_a
     return y_rot
+
+
+def _reflect_windfield(x, y, reflect_x, reflect_y):
+    """Reflect positions and wind vectors across coordinate axes.
+
+    reflect_x: flip east-west axis  -> negate lon, negate sin (east-west wind)
+    reflect_y: flip north-south axis -> negate lat, negate cos (north-south wind)
+    """
+    x_ref = x.clone()
+    y_ref = y.clone()
+    if reflect_x:
+        x_ref[..., 1] = -x[..., 1]
+        y_ref[..., 0] = -y[..., 0]
+    if reflect_y:
+        x_ref[..., 0] = -x[..., 0]
+        y_ref[..., 1] = -y[..., 1]
+    return x_ref, y_ref
 
 
 def pad_batch(
@@ -334,8 +437,11 @@ def collate_fn(batch, augment=True):
         angles = torch.rand(B_raw) * (2 * math.pi)
         cos_a = angles.cos()
         sin_a = angles.sin()
+        reflect_x = torch.rand(B_raw) < 0.5
+        reflect_y = torch.rand(B_raw) < 0.5
     else:
         cos_a = sin_a = None
+        reflect_x = reflect_y = None
 
     context_xs, context_ys, target_xs, target_ys = [], [], [], []
     ctx_lens, tgt_lens = [], []
@@ -346,6 +452,8 @@ def collate_fn(batch, augment=True):
             continue
 
         if augment:
+            if reflect_x[i] or reflect_y[i]:
+                x, y = _reflect_windfield(x, y, reflect_x[i], reflect_y[i])
             y = _rotate_wind(y, cos_a[i], sin_a[i])
 
         n_ctx = int(n * np.random.uniform(0.25, 0.75))
@@ -372,7 +480,6 @@ def collate_fn(batch, augment=True):
 
 def _worker_init(worker_id):
     """Reseed numpy RNG per DataLoader worker."""
-    import torch
     np.random.seed((torch.initial_seed() + worker_id) % 2**32)
 
 
@@ -385,6 +492,39 @@ def make_dataloader(cache_dir, batch_size=16, shuffle=True, num_workers=4):
         persistent_workers=num_workers > 0)
 
 
-def collate_fn_val(batch):
-    """collate_fn with augment=False for validation."""
-    return collate_fn(batch, augment=False)
+def collate_fn_val(batch, context_frac=0.5):
+    """Hold-out validation collate: target = complement of context (no leakage).
+
+    Unlike collate_fn (where context is a subset of target for the NP training
+    objective), this splits each snapshot into disjoint context/target sets so
+    validation loss measures generalisation to truly unseen points.
+    """
+    context_xs, context_ys, target_xs, target_ys = [], [], [], []
+    ctx_lens, tgt_lens = [], []
+
+    for (x, y) in batch:
+        n = x.size(0)
+        if n < 2:
+            continue
+
+        n_ctx = max(1, min(int(n * context_frac), n - 1))
+        perm = torch.randperm(n)
+        ctx_idx = perm[:n_ctx]
+        held_idx = perm[n_ctx:]
+        if held_idx.numel() == 0:
+            continue
+
+        context_xs.append(x[ctx_idx])
+        context_ys.append(y[ctx_idx])
+        target_xs.append(x[held_idx])
+        target_ys.append(y[held_idx])
+
+        ctx_lens.append(n_ctx)
+        tgt_lens.append(held_idx.numel())
+
+    if not context_xs:
+        raise RuntimeError(
+            "Empty batch — every item had too few observations to split.")
+
+    return pad_batch(
+        context_xs, context_ys, target_xs, target_ys, ctx_lens, tgt_lens)

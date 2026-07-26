@@ -6,13 +6,14 @@ and visualise_uncertainty.py to avoid duplication.
 """
 
 import random
+import math
 
 import numpy as np
 
 from wind_map.preprocess import (
     _parse_datetime,
-    CENTRE_LAT, CENTRE_LON, LAT_RANGE_DEG, LON_RANGE_DEG,
-    MAX_ALT_FT, day_grouped_split, decode_wind, WindSnapshotDataset,
+    load_params, KM_PER_DEG_LAT,
+    day_grouped_split, decode_wind, WindSnapshotDataset,
 )
 
 
@@ -37,14 +38,16 @@ def load_snapshot(cache_dir, snapshot_id):
     ds = WindSnapshotDataset(cache_dir, snapshot_ids=[snapshot_id])
     x, y = ds[0]
     x, y = x.numpy(), y.numpy()
+    params = load_params(cache_dir)
 
-    lat = x[:, 0] * LAT_RANGE_DEG + CENTRE_LAT
-    lon = x[:, 1] * LON_RANGE_DEG + CENTRE_LON
-    alt = x[:, 2] * MAX_ALT_FT
+    km_per_deg_lon = 111.0 * math.cos(math.radians(params.centre_lat))
+    lat = x[:, 0] * params.range_km / KM_PER_DEG_LAT + params.centre_lat
+    lon = x[:, 1] * params.range_km / km_per_deg_lon + params.centre_lon
+    alt = np.exp(x[:, 2] * np.log(1 + params.max_alt_ft)) - 1
 
     obs = []
     for i in range(len(x)):
-        wd, ws = decode_wind(y[i, 0], y[i, 1], y[i, 2])
+        wd, ws = decode_wind(y[i, 0], y[i, 1], y[i, 2], params)
         obs.append({
             "lat": float(lat[i]),
             "lon": float(lon[i]),
@@ -75,12 +78,26 @@ def pick_snapshot(cache_dir, snapshot_id=None, split="val"):
     raise RuntimeError("Could not find valid snapshot.")
 
 
-def make_grid(alt_ft, n_lat=30, n_lon=40,
-              lat_range_deg=LAT_RANGE_DEG, lon_range_deg=LON_RANGE_DEG):
-    lats = np.linspace(CENTRE_LAT - lat_range_deg,
-                       CENTRE_LAT + lat_range_deg, n_lat)
-    lons = np.linspace(CENTRE_LON - lon_range_deg,
-                       CENTRE_LON + lon_range_deg, n_lon)
+def make_grid(alt_ft, n_lat=30, n_lon=40, params=None,
+              lat_range_deg=None, lon_range_deg=None):
+    if params is not None:
+        if lat_range_deg is None:
+            lat_range_deg = params.range_km / KM_PER_DEG_LAT
+        if lon_range_deg is None:
+            lon_range_deg = params.range_km / params.km_per_deg_lon
+    else:
+        if lat_range_deg is None:
+            lat_range_deg = 0.63
+        if lon_range_deg is None:
+            lon_range_deg = 1.0
+
+    centre_lat = params.centre_lat if params is not None else 51.071066
+    centre_lon = params.centre_lon if params is not None else -1.042441
+
+    lats = np.linspace(centre_lat - lat_range_deg,
+                       centre_lat + lat_range_deg, n_lat)
+    lons = np.linspace(centre_lon - lon_range_deg,
+                       centre_lon + lon_range_deg, n_lon)
     lon_grid, lat_grid = np.meshgrid(lons, lats)
 
     queries = [{"lat": float(lat_grid[i, j]),
