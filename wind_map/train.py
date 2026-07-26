@@ -4,7 +4,6 @@ wind_map.train — Training loop for the Wind ANP.
 
 import os
 import copy
-import threading
 from contextlib import nullcontext
 
 import torch as t
@@ -94,7 +93,7 @@ def _save_checkpoint(path, ckpt):
 
 def train(cache_dir, num_hidden=128, epochs=200,
           batch_size=16, num_workers=4,
-          num_layers=4, dropout=0.0,
+          layers=4, dropout=0.0,
           init_checkpoint=None,
           split_seed=42, lr=1e-3, warmup_steps=4000,
           warmup_frac=None, kl_warmup_steps=2000,
@@ -104,7 +103,6 @@ def train(cache_dir, num_hidden=128, epochs=200,
           ema_decay=0.999,
           use_amp=True,
           weight_decay=1e-5,
-          use_nearest_dist=True,
           use_dist_bias=True,
           num_decoder_layers=3):
     """
@@ -165,10 +163,9 @@ def train(cache_dir, num_hidden=128, epochs=200,
     # --- Model ---
     model = LatentModel(
         num_hidden, x_dim=3, y_dim=3,
-        num_layers=num_layers,
+        layers=layers,
         dropout=dropout,
         free_bits=free_bits,
-        use_nearest_dist=use_nearest_dist,
         use_dist_bias=use_dist_bias,
         num_decoder_layers=num_decoder_layers).to(device)
 
@@ -367,7 +364,7 @@ def train(cache_dir, num_hidden=128, epochs=200,
                     'norm_params': norm_params.to_dict(),
                     'hparams': {
                         'num_hidden': num_hidden,
-                        'num_layers': num_layers,
+                        'layers': layers,
                         'dropout': dropout,
                         'lr': lr,
                         'batch_size': batch_size,
@@ -375,17 +372,12 @@ def train(cache_dir, num_hidden=128, epochs=200,
                         'kl_warmup_steps': kl_warmup_steps,
                         'free_bits': free_bits,
                         'weight_decay': weight_decay,
-                        'use_nearest_dist': use_nearest_dist,
                         'use_dist_bias': use_dist_bias,
                         'num_decoder_layers': num_decoder_layers,
                     },
                 }
                 ema.restore(model)
-                threading.Thread(
-                    target=_save_checkpoint,
-                    args=(best_ckpt_path, ckpt),
-                    daemon=True,
-                ).start()
+                _save_checkpoint(best_ckpt_path, ckpt)
                 if verbose:
                     bvl = best_val_loss
                     print(

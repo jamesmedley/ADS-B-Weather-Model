@@ -17,7 +17,7 @@ parser = argparse.ArgumentParser(
     description='Plot hyperparameter search results.')
 parser.add_argument('--results', default='hp_optim_results.pkl',
                     help='Path to hp search results pickle')
-parser.add_argument('--out-dir', default='outputs/imgs',
+parser.add_argument('--out_dir', default='outputs/imgs',
                     help='Output directory for plots')
 args = parser.parse_args()
 

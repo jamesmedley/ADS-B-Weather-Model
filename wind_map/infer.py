@@ -23,7 +23,8 @@ from wind_map.utils import circular_mean, circular_std
 # ---------------------------------------------------------------------------
 
 def load_model_checkpoint(checkpoint_path, device, num_hidden=None,
-                          num_layers=None, dropout=None):
+                          layers=None, dropout=None,
+                          num_decoder_layers=None):
     """Load a LatentModel from a checkpoint file.
 
     Returns (model, ckpt_dict).
@@ -32,21 +33,21 @@ def load_model_checkpoint(checkpoint_path, device, num_hidden=None,
                       weights_only=False)
     hp = ckpt.get('hparams', {})
     num_hidden = num_hidden or hp.get('num_hidden')
-    num_layers = num_layers or hp.get('num_layers', 4)
+    layers = layers or hp.get('layers', 4)
     dropout = dropout if dropout is not None else hp.get('dropout', 0.0)
 
     if num_hidden is None:
         raise ValueError(
             "No 'hparams' in checkpoint — pass num_hidden explicitly.")
 
-    num_decoder_layers = hp.get('num_decoder_layers', 3)
-    use_nearest_dist = hp.get('use_nearest_dist', False)
+    num_decoder_layers = (
+        num_decoder_layers if num_decoder_layers is not None
+        else hp.get('num_decoder_layers', 3))
     use_dist_bias = hp.get('use_dist_bias', False)
     model = LatentModel(
         num_hidden, x_dim=3,
-        num_layers=num_layers,
+        layers=layers,
         dropout=dropout,
-        use_nearest_dist=use_nearest_dist,
         use_dist_bias=use_dist_bias,
         num_decoder_layers=num_decoder_layers,
     ).to(device)
@@ -89,23 +90,32 @@ def _log_speed_to_kt(spd_norm, params: NormParams):
     if np.any(neg):
         n_neg = int(neg.sum())
         print(f"  Warning: {n_neg} speed logits produce negative speeds "
-              f"(spd_norm < {(-params.log_speed_mean / params.log_speed_std):.2f})")
+              f"(spd_norm < "
+              f"{(-params.log_speed_mean / params.log_speed_std):.2f})")
     log_speed = spd_norm * params.log_speed_std + params.log_speed_mean
     return np.exp(log_speed) - 1
 
 
-def compute_uncertainty_components(mu_stack, sigma_stack, params: NormParams):
-    """Given mu_stack [n_samples, N, 3] and sigma_stack [n_samples, N, 3]
+def compute_uncertainty_components(mu_stack, sigma_stack, params: NormParams,
+                                   mc_samples=10, seed=0):
+    """Given mu_stack [n_z, N, 3] and sigma_stack [n_z, N, 3]
     from multiple latent draws, return epistemic and aleatoric uncertainty.
+
+    Aleatoric direction std is computed via MC integration of the
+    predictive distribution (avoids the delta-method approximation).
+    Aleatoric speed std uses the exact Jacobian of the log transform.
+    Epistemic std is the standard deviation of z-draw means.
 
     Returns dict with keys:
         epistemic_dir_std, epistemic_speed_std,
         aleatoric_dir_std, aleatoric_speed_std
     """
+    n_z, n_pts = mu_stack.shape[:2]
     sin_mu = mu_stack[..., 0]
     cos_mu = mu_stack[..., 1]
     spd_mu = mu_stack[..., 2]
 
+    # --- Epistemic: variance of z-draw means ---
     sample_dirs = np.degrees(np.arctan2(sin_mu, cos_mu)) % 360
     sample_speeds = _log_speed_to_kt(spd_mu, params)
 
@@ -115,19 +125,28 @@ def compute_uncertainty_components(mu_stack, sigma_stack, params: NormParams):
     sin_sig = sigma_stack[..., 0]
     cos_sig = sigma_stack[..., 1]
     spd_sig = sigma_stack[..., 2]
-    R2 = sin_mu ** 2 + cos_mu ** 2 + 1e-6
-    aleatoric_dir_var_rad2 = (
-        (cos_mu / R2) ** 2 * sin_sig ** 2
-        + (sin_mu / R2) ** 2 * cos_sig ** 2
-    )
-    aleatoric_dir_var_deg2 = np.degrees(np.sqrt(aleatoric_dir_var_rad2)) ** 2
-    aleatoric_dir_std = np.sqrt(aleatoric_dir_var_deg2.mean(axis=0))
 
-    # Log-speed Jacobian: d(speed)/d(spd_norm) = log_speed_std * exp(log_speed)
+    # --- Aleatoric speed: Jacobian-based (exact for the log transform) ---
     log_speed_mean_rep = params.log_speed_mean + spd_mu * params.log_speed_std
     jacobian = params.log_speed_std * np.exp(log_speed_mean_rep)
     aleatoric_speed_var = (spd_sig * jacobian) ** 2
     aleatoric_speed_std = np.sqrt(aleatoric_speed_var.mean(axis=0))
+
+    # --- Aleatoric direction: MC integration ---
+    # Draw K MC samples per z-draw from N(mu_z, sigma_z), convert to
+    # direction via atan2, compute within-z circular std, then average.
+    rng = np.random.default_rng(seed)
+    K = min(mc_samples, 10)
+    within_z_std = np.empty((n_z, n_pts))
+    for z in range(n_z):
+        eps_sin = rng.normal(0, 1, (K, n_pts)) * sin_sig[z]
+        eps_cos = rng.normal(0, 1, (K, n_pts)) * cos_sig[z]
+        sin_mc = sin_mu[z] + eps_sin
+        cos_mc = cos_mu[z] + eps_cos
+        mc_dirs = np.degrees(np.arctan2(sin_mc, cos_mc)) % 360
+        within_z_std[z] = circular_std(mc_dirs, axis=0)
+
+    aleatoric_dir_std = within_z_std.mean(axis=0)
 
     return {
         'epistemic_dir_std': epistemic_dir_std,
@@ -143,13 +162,15 @@ def compute_uncertainty_components(mu_stack, sigma_stack, params: NormParams):
 
 class WindPredictor:
     def __init__(self, checkpoint_path, num_hidden=None,
-                 num_layers=None, dropout=None,
+                 layers=None, dropout=None,
+                 num_decoder_layers=None,
                  device=None, params: NormParams = None):
         if device is None:
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.device = torch.device(device)
         self.model, ckpt = load_model_checkpoint(
-            checkpoint_path, self.device, num_hidden, num_layers, dropout)
+            checkpoint_path, self.device, num_hidden, layers, dropout,
+            num_decoder_layers=num_decoder_layers)
         print(f"Loaded checkpoint from epoch {ckpt.get('epoch', '?')} "
               f"(val_loss={ckpt.get('val_loss', float('nan')):.4f})")
 

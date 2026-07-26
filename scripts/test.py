@@ -35,7 +35,7 @@ def _circular_abs_diff_deg(a, b):
 
 @t.no_grad()
 def evaluate(checkpoint_path, cache_dir, split='test', num_hidden=None,
-             num_layers=None, dropout=None,
+             layers=None, dropout=None, num_decoder_layers=None,
              context_frac=0.5, n_samples=30, batch_size=16, split_seed=42,
              eval_seed=0, device=None, verbose=True):
     """
@@ -48,7 +48,8 @@ def evaluate(checkpoint_path, cache_dir, split='test', num_hidden=None,
         device = t.device(device)
 
     model, ckpt = load_model_checkpoint(checkpoint_path, device, num_hidden,
-                                        num_layers, dropout)
+                                        layers, dropout,
+                                        num_decoder_layers=num_decoder_layers)
 
     params = load_params(cache_dir)
 
@@ -141,8 +142,8 @@ def evaluate(checkpoint_path, cache_dir, split='test', num_hidden=None,
         sin_mu = mean_mu_np[..., 0]
         cos_mu = mean_mu_np[..., 1]
         R2 = sin_mu**2 + cos_mu**2 + 1e-9
-        var_dir_rad = ((cos_mu / R2) * total_std_np[..., 0])**2 \
-                      + ((sin_mu / R2) * total_std_np[..., 1])**2
+        var_dir_rad = (((cos_mu / R2) * total_std_np[..., 0])**2
+                       + ((sin_mu / R2) * total_std_np[..., 1])**2)
         std_dir_deg = np.degrees(np.sqrt(var_dir_rad))
 
         log_speed_pred = (mean_mu_np[..., 2] * params.log_speed_std
@@ -208,9 +209,11 @@ if __name__ == '__main__':
     )
     parser.add_argument('--hidden', type=int, default=None)
     parser.add_argument('--layers', type=int, default=None)
+    parser.add_argument('--decoder_layers', type=int, default=None,
+                        help='Number of hidden layers in the decoder MLP')
     parser.add_argument('--dropout', type=float, default=None)
     parser.add_argument(
-        '--context-frac', type=float, default=0.5,
+        '--context_frac', type=float, default=0.5,
         help=(
             'Fraction of each snapshot used as'
             ' context (default: 0.5)'
@@ -219,8 +222,8 @@ if __name__ == '__main__':
     parser.add_argument('--samples', type=int, default=30,
                         help='Number of latent z samples (default: 30)')
     parser.add_argument('--batch', type=int, default=16)
-    parser.add_argument('--split-seed', type=int, default=42)
-    parser.add_argument('--eval-seed', type=int, default=0)
+    parser.add_argument('--split_seed', type=int, default=42)
+    parser.add_argument('--eval_seed', type=int, default=0)
     parser.add_argument(
         '--out', default=None,
         help='Optional JSON output path',
@@ -233,8 +236,9 @@ if __name__ == '__main__':
         cache_dir=args.cache,
         split=args.split,
         num_hidden=args.hidden,
-        num_layers=args.layers,
+        layers=args.layers,
         dropout=args.dropout,
+        num_decoder_layers=args.decoder_layers,
         context_frac=args.context_frac,
         n_samples=args.samples,
         batch_size=args.batch,

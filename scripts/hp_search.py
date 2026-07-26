@@ -28,6 +28,7 @@ def make_objective(cache_dir, search_epochs,
                    warmup_frac, dropout, patience,
                    use_amp):
     run_counter = itertools.count(1)
+
     def objective(params):
         n = next(run_counter)
         print(f"Search Run {n}")
@@ -43,7 +44,7 @@ def make_objective(cache_dir, search_epochs,
             epochs=search_epochs,
             batch_size=batch,
             num_workers=num_workers,
-            num_layers=layers,
+            layers=layers,
             dropout=dropout,
             lr=lr,
             warmup_frac=warmup_frac,
@@ -71,16 +72,16 @@ if __name__ == '__main__':
             ' for the Wind ANP'
             ' (scikit-optimize).'))
     p.add_argument('--cache', required=True)
-    p.add_argument('--n-calls', type=int, default=200)
-    p.add_argument('--search-epochs', type=int, default=2000)
-    p.add_argument('--warmup-frac', type=float, default=0.05)
+    p.add_argument('--n_calls', type=int, default=200)
+    p.add_argument('--search_epochs', type=int, default=2000)
+    p.add_argument('--warmup_frac', type=float, default=0.05)
     p.add_argument('--dropout', type=float, default=0.2)
     p.add_argument('--patience', type=int, default=50)
     p.add_argument('--workers', type=int, default=4)
-    p.add_argument('--split-seed', type=int, default=42)
-    p.add_argument('--random-state', type=int, default=42)
+    p.add_argument('--split_seed', type=int, default=42)
+    p.add_argument('--random_state', type=int, default=42)
     p.add_argument('--out', default='hp_optim_results.pkl')
-    p.add_argument('--no-amp', action='store_true',
+    p.add_argument('--no_amp', action='store_true',
                    help='Disable automatic mixed precision')
 
     args = p.parse_args()

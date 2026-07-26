@@ -90,7 +90,7 @@ class DeterministicEncoder(nn.Module):
     """
 
     def __init__(self, num_hidden, x_dim=3, y_dim=3,
-                 num_heads=4, num_layers=4, dropout=0.0,
+                 num_heads=4, layers=4, dropout=0.0,
                  use_dist_bias=False):
         super().__init__()
         self.y_dim = y_dim
@@ -98,12 +98,12 @@ class DeterministicEncoder(nn.Module):
         self.input_projection = nn.Linear(x_dim + y_dim, num_hidden)
         self.self_attentions = nn.ModuleList([
             Attention(num_hidden, h=num_heads, dropout=dropout)
-            for _ in range(num_layers)
+            for _ in range(layers)
         ])
         self.cross_attentions = nn.ModuleList([
             Attention(num_hidden, h=num_heads, dropout=dropout,
                       use_dist_bias=use_dist_bias)
-            for _ in range(num_layers)
+            for _ in range(layers)
         ])
 
     def forward(self, context_x, context_y, target_x, context_mask=None):
@@ -136,12 +136,12 @@ class LatentEncoder(nn.Module):
     -> mean -> mu/log_sigma -> z"""
 
     def __init__(self, num_hidden, num_latents, x_dim=3, y_dim=3,
-                 num_heads=4, num_layers=4, dropout=0.0):
+                 num_heads=4, layers=4, dropout=0.0):
         super().__init__()
         self.input_projection = nn.Linear(x_dim + y_dim, num_hidden)
         self.self_attentions = nn.ModuleList([
             Attention(num_hidden, h=num_heads, dropout=dropout)
-            for _ in range(num_layers)
+            for _ in range(layers)
         ])
 
         d = num_hidden

@@ -132,14 +132,17 @@ class ParticleSwarm:
 
 def build_wind_gif(checkpoint, alt_ft, context, n_samples,
                    n_lat, n_lon, output,
-                   num_hidden, num_layers,
+                   num_hidden, layers,
                    n_particles, n_frames, fps, dt_seconds, trail_len,
                    snapshot_id=None, snapshot_time=None,
                    params=None,
-                   lat_range_deg=None, lon_range_deg=None, seed=0):
+                   lat_range_deg=None, lon_range_deg=None, seed=0,
+                   num_decoder_layers=None):
     predictor = WindPredictor(
         checkpoint, num_hidden=num_hidden,
-        num_layers=num_layers, params=params)
+        layers=layers,
+        num_decoder_layers=num_decoder_layers,
+        params=params)
 
     if params is not None:
         default_lat_range = params.range_km / KM_PER_DEG_LAT
@@ -351,7 +354,9 @@ if __name__ == "__main__":
     p.add_argument("--alt_ft", type=float, default=35000)
     p.add_argument("--output", default="outputs/imgs/wind_flow.gif")
     p.add_argument("--hidden", type=int, default=128)
-    p.add_argument("--num_layers", type=int, default=4)
+    p.add_argument("--layers", type=int, default=4)
+    p.add_argument('--decoder_layers', type=int, default=None,
+                   help='Number of hidden layers in the decoder MLP')
     p.add_argument("--samples", type=int, default=1000)
     p.add_argument("--grid_lat", type=int, default=45)
     p.add_argument("--grid_lon", type=int, default=45)
@@ -412,7 +417,8 @@ if __name__ == "__main__":
         n_lon=args.grid_lon,
         output=args.output,
         num_hidden=args.hidden,
-        num_layers=args.num_layers,
+        layers=args.layers,
+        num_decoder_layers=args.decoder_layers,
         n_particles=args.n_particles,
         n_frames=args.n_frames,
         fps=args.fps,

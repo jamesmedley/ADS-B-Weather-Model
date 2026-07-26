@@ -208,7 +208,7 @@ if __name__ == '__main__':
              ' (default: ./data/npy_cache)'
     )
     parser.add_argument(
-        '--min-aircraft', type=int,
+        '--min_aircraft', type=int,
         default=MIN_AIRCRAFT,
         help=(
             f'Minimum aircraft_count per snapshot'

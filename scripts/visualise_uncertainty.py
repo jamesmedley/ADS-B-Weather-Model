@@ -166,7 +166,7 @@ def plot_components(result, lat_grid, lon_grid, alt_ft, n_lat, n_lon, output,
             unc_map, origin="lower",
             extent=[lon_grid.min(), lon_grid.max(),
                     lat_grid.min(), lat_grid.max()],
-            cmap="inferno", interpolation="nearest",
+            cmap="inferno", interpolation="bilinear",
             aspect="auto")
 
         if not averaged:
@@ -185,6 +185,8 @@ def plot_components(result, lat_grid, lon_grid, alt_ft, n_lat, n_lon, output,
             ax.scatter(all_context_lon, all_context_lat, marker=".", s=3,
                        color="#00ffff", alpha=0.08, zorder=5)
 
+        ax.set_xlim(lon_grid.min(), lon_grid.max())
+        ax.set_ylim(lat_grid.min(), lat_grid.max())
         ax.set_title(title, fontsize=11)
         ax.set_xlabel("Longitude")
         ax.set_ylabel("Latitude")
@@ -216,7 +218,9 @@ if __name__ == "__main__":
         "--output",
         default="outputs/imgs/uncertainty_components.png")
     p.add_argument("--hidden", type=int, default=128)
-    p.add_argument("--num_layers", type=int, default=4)
+    p.add_argument("--layers", type=int, default=4)
+    p.add_argument('--decoder_layers', type=int, default=None,
+                   help='Number of hidden layers in the decoder MLP')
     p.add_argument("--samples", type=int, default=100)
     p.add_argument("--grid_lat", type=int, default=25)
     p.add_argument("--grid_lon", type=int, default=25)
@@ -241,7 +245,8 @@ if __name__ == "__main__":
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model, ckpt = load_model_checkpoint(
-        args.checkpoint, device, args.hidden, args.num_layers)
+        args.checkpoint, device, args.hidden, args.layers,
+        num_decoder_layers=args.decoder_layers)
 
     if args.average:
         print(f"Averaging over '{args.split}' split...")

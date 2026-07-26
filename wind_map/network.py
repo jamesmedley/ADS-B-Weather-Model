@@ -33,13 +33,12 @@ class LatentModel(nn.Module):
     """
 
     def __init__(self, num_hidden, x_dim=3, y_dim=3, num_heads=4,
-                 num_layers=4, dropout=0.0,
+                 layers=4, dropout=0.0,
                  free_bits=0.01,
-                 use_nearest_dist=False, use_dist_bias=False,
+                 use_dist_bias=False,
                  num_decoder_layers=3):
         super().__init__()
         self.free_bits = free_bits
-        self.use_nearest_dist = use_nearest_dist
         self.num_decoder_layers = num_decoder_layers
 
         assert num_hidden % num_heads == 0, (
@@ -52,18 +51,18 @@ class LatentModel(nn.Module):
         self.latent_encoder = LatentEncoder(
             num_hidden, num_latents,
             x_dim=x_dim, y_dim=y_dim,
-            num_heads=num_heads, num_layers=num_layers,
+            num_heads=num_heads, layers=layers,
             dropout=dropout)
 
         self.deterministic_encoder = DeterministicEncoder(
             num_hidden,
             x_dim=x_dim, y_dim=y_dim,
-            num_heads=num_heads, num_layers=num_layers,
+            num_heads=num_heads, layers=layers,
             dropout=dropout,
             use_dist_bias=use_dist_bias)
 
         representation_size = num_hidden + num_latents
-        decoder_x_dim = x_dim + (1 if use_nearest_dist else 0)
+        decoder_x_dim = x_dim
         self.decoder = Decoder(
             decoder_x_dim, representation_size, decoder_output_sizes,
             target_hidden=num_hidden, dropout=dropout
@@ -95,38 +94,32 @@ class LatentModel(nn.Module):
 
         # Decode to wind distribution parameters
         representation = t.cat([deterministic_rep, latent_rep], dim=-1)
-        decoder_x = target_x
-        if self.use_nearest_dist:
-            diff = target_x.unsqueeze(2) - context_x.unsqueeze(1)
-            pairwise_dist = t.norm(diff, dim=-1)
-            if context_mask is not None:
-                pairwise_dist = pairwise_dist.masked_fill(
-                    ~context_mask.unsqueeze(1), float('inf'))
-            min_dist = pairwise_dist.min(dim=-1, keepdim=True).values
-            decoder_x = t.cat([target_x, min_dist], dim=-1)
-        dist, mu, sigma = self.decoder(representation, decoder_x)
+        dist, mu, sigma = self.decoder(representation, target_x)
 
         if target_y is not None:
             log_p = dist.log_prob(target_y).sum(dim=-1)
             kl_per_dim = kl_divergence(posterior, prior)
-            kl_per_dim = t.clamp(kl_per_dim, min=self.free_bits)
             kl_per_sample = kl_per_dim.sum(dim=-1)
+            kl_per_sample = t.clamp(
+                kl_per_sample,
+                min=self.free_bits * kl_per_dim.size(-1))
             kl = kl_per_sample.unsqueeze(1).expand(-1, num_targets)
 
             if target_mask is not None:
                 mask_f = target_mask.to(log_p.dtype)
                 n_valid = mask_f.sum(dim=1).clamp(min=1.0)
                 log_p_sum = (log_p * mask_f).sum(dim=1)
-                kl = kl * mask_f
+                kl_scaled = kl * mask_f
+                kl_term = kl_weight * kl_scaled.sum() / mask_f.sum()
             else:
                 n_valid = t.full(
                     (log_p.size(0),), float(num_targets),
                     device=log_p.device
                 )
                 log_p_sum = log_p.sum(dim=1)
+                kl_term = kl_weight * t.mean(kl_per_sample)
 
             recon = -t.mean(log_p_sum / n_valid)
-            kl_term = kl_weight * t.mean(kl_per_sample)
             loss = recon + kl_term
         else:
             kl = None

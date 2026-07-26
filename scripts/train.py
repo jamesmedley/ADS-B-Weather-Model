@@ -29,28 +29,28 @@ if __name__ == '__main__':
     parser.add_argument(
         '--layers', type=int, default=4)
     parser.add_argument(
-        '--decoder-layers', type=int, default=3,
+        '--decoder_layers', type=int, default=3,
         help='Number of hidden layers in the decoder MLP')
     parser.add_argument(
         '--dropout', type=float, default=0.2)
     parser.add_argument(
         '--lr', type=float, default=1.65e-03)
     parser.add_argument(
-        '--warmup-steps', type=int, default=4000,
+        '--warmup_steps', type=int, default=4000,
         help='LR warmup steps '
-             '(ignored if --warmup-frac is set)')
+             '(ignored if --warmup_frac is set)')
     parser.add_argument(
-        '--warmup-frac', type=float, default=None,
+        '--warmup_frac', type=float, default=None,
         help='Warmup as fraction of total run steps'
-             ' (overrides --warmup-steps)')
+             ' (overrides --warmup_steps)')
     parser.add_argument(
-        '--kl-warmup-steps', type=int, default=2000,
+        '--kl_warmup_steps', type=int, default=2000,
         help='KL weight linear warmup steps')
     parser.add_argument(
-        '--free-bits', type=float, default=0.01,
+        '--free_bits', type=float, default=0.01,
         help='Free bits per latent dimension (nats)')
     parser.add_argument(
-        '--checkpoint-dir',
+        '--checkpoint_dir',
         default='./checkpoint')
     parser.add_argument(
         '--patience', type=int, default=0,
@@ -60,16 +60,13 @@ if __name__ == '__main__':
         help='Optional pretrained checkpoint '
              'to initialise from')
     parser.add_argument(
-        '--no-amp', action='store_true',
+        '--no_amp', action='store_true',
         help='Disable automatic mixed precision')
     parser.add_argument(
-        '--weight-decay', type=float, default=1e-5,
+        '--weight_decay', type=float, default=1e-5,
         help='Weight decay for AdamW')
     parser.add_argument(
-        '--no-nearest-dist', action='store_true',
-        help='Disable nearest-context-distance decoder feature')
-    parser.add_argument(
-        '--no-dist-bias', action='store_true',
+        '--no_dist_bias', action='store_true',
         help='Disable distance bias in cross-attention')
     args = parser.parse_args()
 
@@ -79,7 +76,7 @@ if __name__ == '__main__':
         epochs=args.epochs,
         batch_size=args.batch,
         num_workers=args.workers,
-        num_layers=args.layers,
+        layers=args.layers,
         num_decoder_layers=args.decoder_layers,
         dropout=args.dropout,
         lr=args.lr,
@@ -92,6 +89,5 @@ if __name__ == '__main__':
         patience=args.patience,
         use_amp=not args.no_amp,
         weight_decay=args.weight_decay,
-        use_nearest_dist=not args.no_nearest_dist,
         use_dist_bias=not args.no_dist_bias,
     )

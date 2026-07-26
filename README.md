@@ -2,7 +2,8 @@
 
 An Attentive Neural Process (ANP) that predicts wind vectors from ADS-B aircraft observations. Given a set of aircraft-derived wind measurements (direction and speed) at known positions, the model learns to interpolate wind fields across a region and quantify its own uncertainty.
 
-![Predicted wind field](outputs/imgs/wind_field.png)
+![Predicted wind field uncertainty](outputs\imgs\wind_field_uncertainty.png)
+![Predicted wind field basemap](outputs\imgs\wind_field_basemap.png)
 
 ## How it works
 
@@ -19,7 +20,7 @@ The model is an [Attentive Neural Process](https://arxiv.org/abs/1901.05761) —
 
 **Decoder.** Concatenates `r*`, `z`, and the target position `x*`, then passes them through an MLP to output per-point mean and standard deviation of the predictive wind distribution.
 
-Both encoders use pre-norm Transformer blocks (scaled dot-product self-attention + position-wise FFN) rather than the simple MLPs in the original ANP paper.
+Both encoders use post-norm Transformer blocks (scaled dot-product self-attention + position-wise FFN) rather than the simple MLPs in the original ANP paper.
 
 **Training.** Optimised via the negative ELBO: reconstruction log-likelihood under the predictive distribution minus KL divergence between the posterior (from target observations) and prior (from context only). Direction is encoded as `(sin, cos)` to respect circularity.
 

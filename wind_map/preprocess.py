@@ -379,7 +379,7 @@ def _reflect_windfield(x, y, reflect_x, reflect_y):
     """Reflect positions and wind vectors across coordinate axes.
 
     reflect_x: flip east-west axis  -> negate lon, negate sin (east-west wind)
-    reflect_y: flip north-south axis -> negate lat, negate cos (north-south wind)
+    reflect_y: flip N-S axis -> negate lat, negate cos (north-south wind)
     """
     x_ref = x.clone()
     y_ref = y.clone()
@@ -456,7 +456,7 @@ def collate_fn(batch, augment=True):
                 x, y = _reflect_windfield(x, y, reflect_x[i], reflect_y[i])
             y = _rotate_wind(y, cos_a[i], sin_a[i])
 
-        n_ctx = int(n * np.random.uniform(0.25, 0.75))
+        n_ctx = int(n * float(torch.empty(1).uniform_(0.25, 0.75)))
         n_ctx = max(1, min(n_ctx, n - 1))
 
         perm = torch.randperm(n)
@@ -479,8 +479,10 @@ def collate_fn(batch, augment=True):
 
 
 def _worker_init(worker_id):
-    """Reseed numpy RNG per DataLoader worker."""
-    np.random.seed((torch.initial_seed() + worker_id) % 2**32)
+    """Reseed numpy and torch RNG per DataLoader worker."""
+    seed = (torch.initial_seed() + worker_id) % 2**32
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
 
 def make_dataloader(cache_dir, batch_size=16, shuffle=True, num_workers=4):
@@ -493,7 +495,7 @@ def make_dataloader(cache_dir, batch_size=16, shuffle=True, num_workers=4):
 
 
 def collate_fn_val(batch, context_frac=0.5):
-    """Hold-out validation collate: target = complement of context (no leakage).
+    """Hold-out validation collate: target = complement of context (no leak).
 
     Unlike collate_fn (where context is a subset of target for the NP training
     objective), this splits each snapshot into disjoint context/target sets so
