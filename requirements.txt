@@ -1,8 +1,0 @@
-torch>=2.0
-numpy
-tqdm
-matplotlib
-pillow
-scipy
-contextily
-scikit-optimize
