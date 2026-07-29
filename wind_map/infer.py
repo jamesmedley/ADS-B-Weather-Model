@@ -23,7 +23,9 @@ from wind_map.utils import circular_mean, circular_std
 # ---------------------------------------------------------------------------
 
 def load_model_checkpoint(checkpoint_path, device, num_hidden=None,
-                          layers=None, dropout=None,
+                          num_latents=None,
+                          latent_layers=None, deterministic_layers=None,
+                          dropout=None,
                           num_decoder_layers=None):
     """Load a LatentModel from a checkpoint file.
 
@@ -33,7 +35,12 @@ def load_model_checkpoint(checkpoint_path, device, num_hidden=None,
                       weights_only=False)
     hp = ckpt.get('hparams', {})
     num_hidden = num_hidden or hp.get('num_hidden')
-    layers = layers or hp.get('layers', 4)
+    num_latents = num_latents or hp.get('num_latents')
+    latent_layers = (
+        latent_layers or hp.get('latent_layers', hp.get('layers', 4)))
+    deterministic_layers = (
+        deterministic_layers
+        or hp.get('deterministic_layers', hp.get('layers', 4)))
     dropout = dropout if dropout is not None else hp.get('dropout', 0.0)
 
     if num_hidden is None:
@@ -45,8 +52,9 @@ def load_model_checkpoint(checkpoint_path, device, num_hidden=None,
         else hp.get('num_decoder_layers', 3))
     use_dist_bias = hp.get('use_dist_bias', False)
     model = LatentModel(
-        num_hidden, x_dim=3,
-        layers=layers,
+        num_hidden, num_latents=num_latents, x_dim=3,
+        latent_layers=latent_layers,
+        deterministic_layers=deterministic_layers,
         dropout=dropout,
         use_dist_bias=use_dist_bias,
         num_decoder_layers=num_decoder_layers,
@@ -162,14 +170,20 @@ def compute_uncertainty_components(mu_stack, sigma_stack, params: NormParams,
 
 class WindPredictor:
     def __init__(self, checkpoint_path, num_hidden=None,
-                 layers=None, dropout=None,
+                 num_latents=None,
+                 latent_layers=None, deterministic_layers=None,
+                 dropout=None,
                  num_decoder_layers=None,
                  device=None, params: NormParams = None):
         if device is None:
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.device = torch.device(device)
         self.model, ckpt = load_model_checkpoint(
-            checkpoint_path, self.device, num_hidden, layers, dropout,
+            checkpoint_path, self.device, num_hidden,
+            num_latents=num_latents,
+            latent_layers=latent_layers,
+            deterministic_layers=deterministic_layers,
+            dropout=dropout,
             num_decoder_layers=num_decoder_layers)
         print(f"Loaded checkpoint from epoch {ckpt.get('epoch', '?')} "
               f"(val_loss={ckpt.get('val_loss', float('nan')):.4f})")
@@ -204,7 +218,7 @@ class WindPredictor:
 
         mu_samples, sigma_samples = [], []
         for _ in range(n_samples):
-            mu, sigma, _, _ = self.model(
+            mu, sigma, _, _, _ = self.model(
                 context_x, context_y, target_x,
                 target_y=None
             )

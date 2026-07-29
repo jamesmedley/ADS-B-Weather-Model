@@ -3,9 +3,12 @@ wind_map.train — Training loop for the Wind ANP.
 """
 
 import os
+import csv
 import copy
+import math
 from contextlib import nullcontext
 
+import numpy as np
 import torch as t
 from torch.optim.lr_scheduler import (
     SequentialLR, LinearLR, CosineAnnealingWarmRestarts,
@@ -91,9 +94,9 @@ def _save_checkpoint(path, ckpt):
     os.replace(tmp, path)
 
 
-def train(cache_dir, num_hidden=128, epochs=200,
+def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
           batch_size=16, num_workers=4,
-          layers=4, dropout=0.0,
+          latent_layers=4, deterministic_layers=4, dropout=0.0,
           init_checkpoint=None,
           split_seed=42, lr=1e-3, warmup_steps=4000,
           warmup_frac=None, kl_warmup_steps=2000,
@@ -162,8 +165,9 @@ def train(cache_dir, num_hidden=128, epochs=200,
 
     # --- Model ---
     model = LatentModel(
-        num_hidden, x_dim=3, y_dim=3,
-        layers=layers,
+        num_hidden, num_latents=num_latents, x_dim=3, y_dim=3,
+        latent_layers=latent_layers,
+        deterministic_layers=deterministic_layers,
         dropout=dropout,
         free_bits=free_bits,
         use_dist_bias=use_dist_bias,
@@ -244,6 +248,22 @@ def train(cache_dir, num_hidden=128, epochs=200,
 
     if save_checkpoint:
         os.makedirs(checkpoint_dir, exist_ok=True)
+        csv_path = os.path.join(checkpoint_dir, 'training_log.csv')
+        csv_columns = [
+            'epoch', 'lr',
+            'train_loss', 'val_loss',
+            'val_nll', 'val_kl',
+            'speed_rmse_kt', 'speed_mae_kt', 'dir_mae_deg',
+            'cov_68', 'cov_95',
+            'active_pct', 'kl_max', 'kl_min',
+            'sigma_speed_kt', 'sigma_dir_deg',
+            'best_so_far',
+        ]
+        with open(csv_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(csv_columns)
+    else:
+        csv_path = None
 
     for epoch in range(1, epochs + 1):
         # Train
@@ -269,7 +289,7 @@ def train(cache_dir, num_hidden=128, epochs=200,
 
             with (t.cuda.amp.autocast(dtype=amp_dtype)
                   if amp_dtype is not None else nullcontext()):
-                mu, sigma, kl, loss = model(
+                mu, sigma, kl, kl_per_dim, loss = model(
                     context_x, context_y,
                     target_x, target_y,
                     context_mask=context_mask,
@@ -314,7 +334,26 @@ def train(cache_dir, num_hidden=128, epochs=200,
         # Validate (using EMA weights)
         ema.apply_shadow(model)
         model.eval()
+
         val_loss_sum = 0.0
+        val_nll_sum = 0.0
+        val_kl_sum = 0.0
+        n_points = 0
+        n_batches = 0
+
+        speed_abs_err_sum = 0.0
+        speed_sq_err_sum = 0.0
+        dir_abs_err_sum = 0.0
+
+        cov_68_sum = 0.0
+        cov_95_sum = 0.0
+
+        sigma_speed_sum = 0.0
+        sigma_dir_sum = 0.0
+
+        kl_dim_sum = None
+        num_latents = 0
+
         with t.no_grad():
             for batch in val_loader:
                 (context_x, context_y,
@@ -324,19 +363,145 @@ def train(cache_dir, num_hidden=128, epochs=200,
                 ]
                 with (t.cuda.amp.autocast(dtype=amp_dtype)
                       if amp_dtype is not None else nullcontext()):
-                    _, _, _, loss = model(
+                    mu, sigma, kl, kl_per_dim, loss = model(
                         context_x, context_y,
                         target_x, target_y,
                         context_mask=context_mask,
                         target_mask=target_mask)
+
                 val_loss_sum += loss.item()
+
+                mask_f = target_mask.to(mu.dtype)
+
+                # Per-target-point KL (clamped)
+                kl_valid = (kl * mask_f).sum() / mask_f.sum().clamp(min=1.0)
+                val_kl_sum += kl_valid.item()
+
+                # Per-dimension KL (unclamped) for active dim tracking
+                if kl_per_dim is not None:
+                    num_latents = kl_per_dim.size(-1)
+                    batch_avg_dim = kl_per_dim.mean(dim=0)  # [latent_dim]
+                    if kl_dim_sum is None:
+                        kl_dim_sum = batch_avg_dim.cpu()
+                    else:
+                        kl_dim_sum += batch_avg_dim.cpu()
+                    n_batches += 1
+
+                # Reconstruction NLL
+                dist = t.distributions.Normal(mu, sigma)
+                log_p = dist.log_prob(target_y).sum(dim=-1)
+                n_valid = mask_f.sum()
+                val_nll_sum += (-log_p * mask_f).sum().item()
+                n_points += n_valid.item()
+
+                # Physical-space metrics (on CPU)
+                mu_np = mu.cpu().numpy()
+                sigma_np = sigma.cpu().numpy()
+                target_y_np = target_y.cpu().numpy()
+                mask_np = target_mask.cpu().numpy().astype(bool)
+
+                sin_pred, cos_pred, spd_norm_pred = (
+                    mu_np[..., 0], mu_np[..., 1], mu_np[..., 2])
+                sin_true, cos_true, spd_norm_true = (
+                    target_y_np[..., 0], target_y_np[..., 1], target_y_np[..., 2])
+
+                pred_dir = np.degrees(
+                    np.arctan2(sin_pred, cos_pred)) % 360
+                true_dir = np.degrees(
+                    np.arctan2(sin_true, cos_true)) % 360
+
+                pred_log_spd = (spd_norm_pred * norm_params.log_speed_std
+                                + norm_params.log_speed_mean)
+                pred_speed = np.exp(pred_log_spd) - 1
+                true_log_spd = (spd_norm_true * norm_params.log_speed_std
+                                + norm_params.log_speed_mean)
+                true_speed = np.exp(true_log_spd) - 1
+
+                speed_err = pred_speed - true_speed
+                dir_diff = np.abs(pred_dir - true_dir) % 360
+                dir_err = np.minimum(dir_diff, 360 - dir_diff)
+
+                m = mask_np
+                speed_abs_err_sum += np.abs(speed_err[m]).sum()
+                speed_sq_err_sum += (speed_err[m] ** 2).sum()
+                dir_abs_err_sum += dir_err[m].sum()
+
+                # Coverage: 1σ / 2σ intervals via delta-method approximation
+                R2 = sin_pred ** 2 + cos_pred ** 2 + 1e-9
+                var_dir_rad = (
+                    ((cos_pred / R2) * sigma_np[..., 0]) ** 2
+                    + ((sin_pred / R2) * sigma_np[..., 1]) ** 2)
+                std_dir_deg = np.degrees(np.sqrt(var_dir_rad))
+
+                std_speed_kt = (
+                    sigma_np[..., 2] * norm_params.log_speed_std
+                    * np.exp(pred_log_spd))
+
+                cov_68_sum += (np.abs(speed_err[m]) <= std_speed_kt[m]).sum()
+                cov_68_sum += (dir_err[m] <= std_dir_deg[m]).sum()
+                cov_95_sum += (np.abs(speed_err[m]) <= 2 * std_speed_kt[m]).sum()
+                cov_95_sum += (dir_err[m] <= 2 * std_dir_deg[m]).sum()
+
+                # Mean predicted sigma in physical units
+                sigma_speed_sum += std_speed_kt[m].sum()
+                sigma_dir_sum += std_dir_deg[m].sum()
+
         ema.restore(model)
 
         avg_val = val_loss_sum / len(val_loader)
+        avg_nll = val_nll_sum / n_points
+        avg_kl = val_kl_sum / n_batches if n_batches > 0 else 0.0
+        speed_rmse = math.sqrt(speed_sq_err_sum / n_points)
+        speed_mae = speed_abs_err_sum / n_points
+        dir_mae = dir_abs_err_sum / n_points
+        cov_68 = cov_68_sum / (2 * n_points)
+        cov_95 = cov_95_sum / (2 * n_points)
+        mean_sigma_speed = sigma_speed_sum / n_points
+        mean_sigma_dir = sigma_dir_sum / n_points
+
+        active_pct = 0.0
+        kl_max_dim = 0.0
+        kl_min_dim = 0.0
+        if kl_dim_sum is not None and n_batches > 0:
+            avg_kl_per_dim = kl_dim_sum / n_batches
+            active_mask = avg_kl_per_dim > free_bits
+            active_pct = (
+                active_mask.sum().item() / num_latents * 100)
+            kl_max_dim = avg_kl_per_dim.max().item()
+            kl_min_dim = avg_kl_per_dim.min().item()
+
         if verbose:
             print(
                 f"  -> train_loss={avg_train:.4f}"
                 f"  val_loss={avg_val:.4f}")
+            print(
+                f"  -> val_nll={avg_nll:.4f}"
+                f"  val_kl={avg_kl:.4f}"
+                f"  speed_rmse={speed_rmse:.2f}kt"
+                f"  speed_mae={speed_mae:.2f}kt"
+                f"  dir_mae={dir_mae:.1f}°"
+                f"  cov_68={cov_68:.1%}"
+                f"  cov_95={cov_95:.1%}"
+                f"  active={active_pct:.0f}%"
+                f"  σ_s={mean_sigma_speed:.2f}kt"
+                f"  σ_d={mean_sigma_dir:.1f}°")
+
+        # Write CSV row
+        if csv_path is not None:
+            current_lr = optim.param_groups[0]['lr']
+            is_best = avg_val < best_val_loss
+            with open(csv_path, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    epoch, f'{current_lr:.6f}',
+                    f'{avg_train:.6f}', f'{avg_val:.6f}',
+                    f'{avg_nll:.6f}', f'{avg_kl:.6f}',
+                    f'{speed_rmse:.4f}', f'{speed_mae:.4f}', f'{dir_mae:.4f}',
+                    f'{cov_68:.6f}', f'{cov_95:.6f}',
+                    f'{active_pct:.2f}', f'{kl_max_dim:.6f}', f'{kl_min_dim:.6f}',
+                    f'{mean_sigma_speed:.4f}', f'{mean_sigma_dir:.4f}',
+                    '1' if is_best else '0',
+                ])
 
         # Checkpoint best epoch
         if avg_val < best_val_loss:
@@ -364,7 +529,9 @@ def train(cache_dir, num_hidden=128, epochs=200,
                     'norm_params': norm_params.to_dict(),
                     'hparams': {
                         'num_hidden': num_hidden,
-                        'layers': layers,
+                        'num_latents': num_latents if num_latents is not None else num_hidden,
+                        'latent_layers': latent_layers,
+                        'deterministic_layers': deterministic_layers,
                         'dropout': dropout,
                         'lr': lr,
                         'batch_size': batch_size,
@@ -433,7 +600,7 @@ def train(cache_dir, num_hidden=128, epochs=200,
                 ]
                 with (t.cuda.amp.autocast(dtype=amp_dtype)
                       if amp_dtype is not None else nullcontext()):
-                    _, _, _, loss = model(
+                    _, _, _, _, loss = model(
                         context_x, context_y,
                         target_x, target_y,
                         context_mask=context_mask,

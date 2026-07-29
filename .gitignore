@@ -14,3 +14,5 @@ hp_optim_results.pkl
 diagnose.py
 Dockerfile
 requirements.txt
+training_log.csv
+outputs/imgs/train_behaviour.png

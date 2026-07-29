@@ -26,14 +26,15 @@ class LatentModel(nn.Module):
         target_y   [B, N_tgt, 3]  — ground truth (training only)
 
     Outputs:
-        mu    [B, N_tgt, 3]  — predicted mean
-        sigma [B, N_tgt, 3]  — predicted std (positive)
-        kl    [B, N_tgt]     — KL divergence (training only, else None)
-        loss  scalar          — negative ELBO (training only, else None)
+        mu         [B, N_tgt, 3]  — predicted mean
+        sigma      [B, N_tgt, 3]  — predicted std (positive)
+        kl         [B, N_tgt]     — KL divergence per target point, clamped (training only)
+        kl_per_dim [B, num_latents] — KL divergence per latent dim, unclamped (training only)
+        loss       scalar         — negative ELBO (training only, else None)
     """
 
-    def __init__(self, num_hidden, x_dim=3, y_dim=3, num_heads=4,
-                 layers=4, dropout=0.0,
+    def __init__(self, num_hidden, num_latents=None, x_dim=3, y_dim=3, num_heads=4,
+                 latent_layers=4, deterministic_layers=4, dropout=0.0,
                  free_bits=0.01,
                  use_dist_bias=False,
                  num_decoder_layers=3):
@@ -41,23 +42,25 @@ class LatentModel(nn.Module):
         self.free_bits = free_bits
         self.num_decoder_layers = num_decoder_layers
 
+        if num_latents is None:
+            num_latents = num_hidden
+
         assert num_hidden % num_heads == 0, (
             f"num_hidden ({num_hidden}) must be divisible"
             f" by num_heads ({num_heads})")
 
-        num_latents = num_hidden
         decoder_output_sizes = [num_hidden] * num_decoder_layers + [2 * y_dim]
 
         self.latent_encoder = LatentEncoder(
             num_hidden, num_latents,
             x_dim=x_dim, y_dim=y_dim,
-            num_heads=num_heads, layers=layers,
+            num_heads=num_heads, layers=latent_layers,
             dropout=dropout)
 
         self.deterministic_encoder = DeterministicEncoder(
             num_hidden,
             x_dim=x_dim, y_dim=y_dim,
-            num_heads=num_heads, layers=layers,
+            num_heads=num_heads, layers=deterministic_layers,
             dropout=dropout,
             use_dist_bias=use_dist_bias)
 
@@ -99,10 +102,8 @@ class LatentModel(nn.Module):
         if target_y is not None:
             log_p = dist.log_prob(target_y).sum(dim=-1)
             kl_per_dim = kl_divergence(posterior, prior)
-            kl_per_sample = kl_per_dim.sum(dim=-1)
-            kl_per_sample = t.clamp(
-                kl_per_sample,
-                min=self.free_bits * kl_per_dim.size(-1))
+            kl_per_dim_clamped = t.clamp(kl_per_dim, min=self.free_bits)
+            kl_per_sample = kl_per_dim_clamped.sum(dim=-1)
             kl = kl_per_sample.unsqueeze(1).expand(-1, num_targets)
 
             if target_mask is not None:
@@ -123,6 +124,7 @@ class LatentModel(nn.Module):
             loss = recon + kl_term
         else:
             kl = None
+            kl_per_dim = None
             loss = None
 
-        return mu, sigma, kl, loss
+        return mu, sigma, kl, kl_per_dim, loss

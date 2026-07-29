@@ -40,13 +40,17 @@ from wind_map.utils import (
 
 def plot_wind(checkpoint, alt_ft, context, n_samples,
               n_lat, n_lon, output_uncertainty, output_basemap,
-              num_hidden, layers, num_decoder_layers=None,
+              num_hidden, num_latents=None,
+              latent_layers=4, deterministic_layers=4,
+              num_decoder_layers=None,
               snapshot_id=None, snapshot_time=None,
               params=None,
               lat_range_deg=None, lon_range_deg=None):
     predictor = WindPredictor(
         checkpoint, num_hidden=num_hidden,
-        layers=layers,
+        num_latents=num_latents,
+        latent_layers=latent_layers,
+        deterministic_layers=deterministic_layers,
         num_decoder_layers=num_decoder_layers,
         params=params)
 
@@ -281,7 +285,10 @@ if __name__ == "__main__":
                        "Base output path; saves"
                        " _uncertainty and _basemap variants"))
     p.add_argument("--hidden", type=int, default=128)
-    p.add_argument("--layers", type=int, default=4)
+    p.add_argument("--num_latents", type=int, default=None,
+                   help='Number of latent dimensions (default: same as --hidden)')
+    p.add_argument("--latent_layers", type=int, default=4)
+    p.add_argument("--deterministic_layers", type=int, default=4)
     p.add_argument('--decoder_layers', type=int, default=None,
                    help='Number of hidden layers in the decoder MLP')
     p.add_argument("--samples", type=int, default=1000)
@@ -344,7 +351,9 @@ if __name__ == "__main__":
         output_uncertainty=uncertainty_path,
         output_basemap=basemap_path,
         num_hidden=args.hidden,
-        layers=args.layers,
+        num_latents=args.num_latents,
+        latent_layers=args.latent_layers,
+        deterministic_layers=args.deterministic_layers,
         num_decoder_layers=args.decoder_layers,
         snapshot_id=sid,
         snapshot_time=snapshot_time,

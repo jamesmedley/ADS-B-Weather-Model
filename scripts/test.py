@@ -35,7 +35,9 @@ def _circular_abs_diff_deg(a, b):
 
 @t.no_grad()
 def evaluate(checkpoint_path, cache_dir, split='test', num_hidden=None,
-             layers=None, dropout=None, num_decoder_layers=None,
+             num_latents=None,
+             latent_layers=None, deterministic_layers=None,
+             dropout=None, num_decoder_layers=None,
              context_frac=0.5, n_samples=30, batch_size=16, split_seed=42,
              eval_seed=0, device=None, verbose=True):
     """
@@ -47,9 +49,13 @@ def evaluate(checkpoint_path, cache_dir, split='test', num_hidden=None,
     else:
         device = t.device(device)
 
-    model, ckpt = load_model_checkpoint(checkpoint_path, device, num_hidden,
-                                        layers, dropout,
-                                        num_decoder_layers=num_decoder_layers)
+    model, ckpt = load_model_checkpoint(
+        checkpoint_path, device, num_hidden,
+        num_latents=num_latents,
+        latent_layers=latent_layers,
+        deterministic_layers=deterministic_layers,
+        dropout=dropout,
+        num_decoder_layers=num_decoder_layers)
 
     params = load_params(cache_dir)
 
@@ -84,8 +90,8 @@ def evaluate(checkpoint_path, cache_dir, split='test', num_hidden=None,
 
         mu_samples, sigma_samples = [], []
         for _ in range(n_samples):
-            mu, sigma, _, _ = model(context_x, context_y, target_x,
-                                    target_y=None, context_mask=context_mask)
+            mu, sigma, _, _, _ = model(context_x, context_y, target_x,
+                                       target_y=None, context_mask=context_mask)
             mu_samples.append(mu)
             sigma_samples.append(sigma)
 
@@ -208,7 +214,9 @@ if __name__ == '__main__':
         default='test',
     )
     parser.add_argument('--hidden', type=int, default=None)
-    parser.add_argument('--layers', type=int, default=None)
+    parser.add_argument('--num_latents', type=int, default=None)
+    parser.add_argument('--latent_layers', type=int, default=None)
+    parser.add_argument('--deterministic_layers', type=int, default=None)
     parser.add_argument('--decoder_layers', type=int, default=None,
                         help='Number of hidden layers in the decoder MLP')
     parser.add_argument('--dropout', type=float, default=None)
@@ -236,7 +244,9 @@ if __name__ == '__main__':
         cache_dir=args.cache,
         split=args.split,
         num_hidden=args.hidden,
-        layers=args.layers,
+        num_latents=args.num_latents,
+        latent_layers=args.latent_layers,
+        deterministic_layers=args.deterministic_layers,
         dropout=args.dropout,
         num_decoder_layers=args.decoder_layers,
         context_frac=args.context_frac,

@@ -132,7 +132,8 @@ class ParticleSwarm:
 
 def build_wind_gif(checkpoint, alt_ft, context, n_samples,
                    n_lat, n_lon, output,
-                   num_hidden, layers,
+                   num_hidden, num_latents=None,
+                   latent_layers=4, deterministic_layers=4,
                    n_particles, n_frames, fps, dt_seconds, trail_len,
                    snapshot_id=None, snapshot_time=None,
                    params=None,
@@ -140,7 +141,9 @@ def build_wind_gif(checkpoint, alt_ft, context, n_samples,
                    num_decoder_layers=None):
     predictor = WindPredictor(
         checkpoint, num_hidden=num_hidden,
-        layers=layers,
+        num_latents=num_latents,
+        latent_layers=latent_layers,
+        deterministic_layers=deterministic_layers,
         num_decoder_layers=num_decoder_layers,
         params=params)
 
@@ -354,7 +357,10 @@ if __name__ == "__main__":
     p.add_argument("--alt_ft", type=float, default=35000)
     p.add_argument("--output", default="outputs/imgs/wind_flow.gif")
     p.add_argument("--hidden", type=int, default=128)
-    p.add_argument("--layers", type=int, default=4)
+    p.add_argument("--num_latents", type=int, default=None,
+                   help='Number of latent dimensions (default: same as --hidden)')
+    p.add_argument("--latent_layers", type=int, default=4)
+    p.add_argument("--deterministic_layers", type=int, default=4)
     p.add_argument('--decoder_layers', type=int, default=None,
                    help='Number of hidden layers in the decoder MLP')
     p.add_argument("--samples", type=int, default=1000)
@@ -417,7 +423,9 @@ if __name__ == "__main__":
         n_lon=args.grid_lon,
         output=args.output,
         num_hidden=args.hidden,
-        layers=args.layers,
+        num_latents=args.num_latents,
+        latent_layers=args.latent_layers,
+        deterministic_layers=args.deterministic_layers,
         num_decoder_layers=args.decoder_layers,
         n_particles=args.n_particles,
         n_frames=args.n_frames,

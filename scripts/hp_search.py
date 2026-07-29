@@ -19,7 +19,7 @@ space = [
     Real(1e-4, 1e-2, "log-uniform"),   # learning rate
     Categorical([64, 128, 256]),        # hidden
     Integer(128, 384),                  # batch size
-    Integer(1, 4),                      # layers
+    Integer(1, 4),                      # latent/deterministic layers
 ]
 
 
@@ -44,7 +44,8 @@ def make_objective(cache_dir, search_epochs,
             epochs=search_epochs,
             batch_size=batch,
             num_workers=num_workers,
-            layers=layers,
+            latent_layers=layers,
+            deterministic_layers=layers,
             dropout=dropout,
             lr=lr,
             warmup_frac=warmup_frac,
@@ -59,7 +60,7 @@ def make_objective(cache_dir, search_epochs,
         val_loss = train_result['best_val_loss']
         print(f"  val_loss={val_loss:.4f}  "
               f"(lr={lr:.2e} hidden={hidden} batch={batch} "
-              f"layers={layers} dropout={dropout:.3f})")
+               f"latent/det_layers={layers} dropout={dropout:.3f})")
         return val_loss
 
     return objective

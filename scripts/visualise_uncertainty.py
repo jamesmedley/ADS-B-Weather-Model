@@ -52,7 +52,7 @@ def predict_components(model, context, queries, n_samples, device,
 
     mu_samples, sigma_samples = [], []
     for _ in range(n_samples):
-        mu, sigma, _, _ = model(context_x, context_y, target_x, target_y=None)
+        mu, sigma, _, _, _ = model(context_x, context_y, target_x, target_y=None)
         mu_samples.append(mu.squeeze(0).cpu())
         sigma_samples.append(sigma.squeeze(0).cpu())
 
@@ -218,7 +218,10 @@ if __name__ == "__main__":
         "--output",
         default="outputs/imgs/uncertainty_components.png")
     p.add_argument("--hidden", type=int, default=128)
-    p.add_argument("--layers", type=int, default=4)
+    p.add_argument("--num_latents", type=int, default=None,
+                   help='Number of latent dimensions (default: same as --hidden)')
+    p.add_argument("--latent_layers", type=int, default=4)
+    p.add_argument("--deterministic_layers", type=int, default=4)
     p.add_argument('--decoder_layers', type=int, default=None,
                    help='Number of hidden layers in the decoder MLP')
     p.add_argument("--samples", type=int, default=100)
@@ -245,7 +248,10 @@ if __name__ == "__main__":
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model, ckpt = load_model_checkpoint(
-        args.checkpoint, device, args.hidden, args.layers,
+        args.checkpoint, device, args.hidden,
+        num_latents=args.num_latents,
+        latent_layers=args.latent_layers,
+        deterministic_layers=args.deterministic_layers,
         num_decoder_layers=args.decoder_layers)
 
     if args.average:

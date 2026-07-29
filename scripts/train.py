@@ -23,11 +23,16 @@ if __name__ == '__main__':
     parser.add_argument(
         '--hidden', type=int, default=128)
     parser.add_argument(
+        '--num_latents', type=int, default=64,
+        help='Number of latent dimensions')
+    parser.add_argument(
         '--batch', type=int, default=512)
     parser.add_argument(
         '--workers', type=int, default=4)
     parser.add_argument(
-        '--layers', type=int, default=4)
+        '--latent_layers', type=int, default=4)
+    parser.add_argument(
+        '--deterministic_layers', type=int, default=2)
     parser.add_argument(
         '--decoder_layers', type=int, default=3,
         help='Number of hidden layers in the decoder MLP')
@@ -73,10 +78,12 @@ if __name__ == '__main__':
     train(
         cache_dir=args.cache,
         num_hidden=args.hidden,
+        num_latents=args.num_latents,
         epochs=args.epochs,
         batch_size=args.batch,
         num_workers=args.workers,
-        layers=args.layers,
+        latent_layers=args.latent_layers,
+        deterministic_layers=args.deterministic_layers,
         num_decoder_layers=args.decoder_layers,
         dropout=args.dropout,
         lr=args.lr,
