@@ -286,7 +286,8 @@ if __name__ == "__main__":
                        " _uncertainty and _basemap variants"))
     p.add_argument("--hidden", type=int, default=128)
     p.add_argument("--num_latents", type=int, default=None,
-                   help='Number of latent dimensions (default: same as --hidden)')
+                   help=('Number of latent dimensions '
+                         '(default: same as --hidden)'))
     p.add_argument("--latent_layers", type=int, default=4)
     p.add_argument("--deterministic_layers", type=int, default=4)
     p.add_argument('--decoder_layers', type=int, default=None,

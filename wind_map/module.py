@@ -168,7 +168,7 @@ class LatentEncoder(nn.Module):
         log_sigma = self.std_layer(hidden)
         sigma = F.softplus(log_sigma) + 1e-6
 
-        return Normal(loc=mu, scale=sigma)
+        return Normal(loc=mu, scale=sigma, validate_args=False)
 
 
 class Decoder(nn.Module):
@@ -188,14 +188,18 @@ class Decoder(nn.Module):
             layers.append(nn.Dropout(dropout))
             current = size
         layers.append(nn.Linear(current, output_sizes[-1]))
-        self.decoder_mlp = nn.Sequential(*layers)
+        self.decoder_mlp = nn.Sequential(*layers[:-1])
+        self.head = layers[-1]
 
     def forward(self, representation, target_x):
         target_x = self.target_projection(target_x)
         hidden = torch.cat([representation, target_x], dim=-1)
         hidden = self.decoder_mlp(hidden)
-        mu, log_sigma = hidden.chunk(2, dim=-1)
-        # sigma floor of 0.1 prevents -inf NLL
-        sigma = 0.1 + 0.9 * F.softplus(log_sigma)
-        dist = Normal(loc=mu, scale=sigma)
+        # Output head in fp32: prevents fp16 overflow/underflow in the
+        # distribution parameters, which destabilises training under AMP.
+        with torch.cuda.amp.autocast(enabled=False):
+            mu, log_sigma = self.head(hidden.float()).chunk(2, dim=-1)
+            # sigma floor of 0.1 prevents -inf NLL
+            sigma = 0.1 + 0.9 * F.softplus(log_sigma)
+        dist = Normal(loc=mu, scale=sigma, validate_args=False)
         return dist, mu, sigma

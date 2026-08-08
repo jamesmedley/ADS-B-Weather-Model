@@ -28,12 +28,15 @@ class LatentModel(nn.Module):
     Outputs:
         mu         [B, N_tgt, 3]  — predicted mean
         sigma      [B, N_tgt, 3]  — predicted std (positive)
-        kl         [B, N_tgt]     — KL divergence per target point, clamped (training only)
-        kl_per_dim [B, num_latents] — KL divergence per latent dim, unclamped (training only)
+        kl         [B, N_tgt]     — KL divergence per target point,
+                                    clamped (training only)
+        kl_per_dim [B, num_latents] — KL divergence per latent dim,
+                                      unclamped (training only)
         loss       scalar         — negative ELBO (training only, else None)
     """
 
-    def __init__(self, num_hidden, num_latents=None, x_dim=3, y_dim=3, num_heads=4,
+    def __init__(self, num_hidden, num_latents=None, x_dim=3,
+                 y_dim=3, num_heads=4,
                  latent_layers=4, deterministic_layers=4, dropout=0.0,
                  free_bits=0.01,
                  use_dist_bias=False,

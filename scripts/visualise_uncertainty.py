@@ -52,7 +52,8 @@ def predict_components(model, context, queries, n_samples, device,
 
     mu_samples, sigma_samples = [], []
     for _ in range(n_samples):
-        mu, sigma, _, _, _ = model(context_x, context_y, target_x, target_y=None)
+        mu, sigma, _, _, _ = model(
+            context_x, context_y, target_x, target_y=None)
         mu_samples.append(mu.squeeze(0).cpu())
         sigma_samples.append(sigma.squeeze(0).cpu())
 
@@ -219,7 +220,8 @@ if __name__ == "__main__":
         default="outputs/imgs/uncertainty_components.png")
     p.add_argument("--hidden", type=int, default=128)
     p.add_argument("--num_latents", type=int, default=None,
-                   help='Number of latent dimensions (default: same as --hidden)')
+                   help=('Number of latent dimensions '
+                         '(default: same as --hidden)'))
     p.add_argument("--latent_layers", type=int, default=4)
     p.add_argument("--deterministic_layers", type=int, default=4)
     p.add_argument('--decoder_layers', type=int, default=None,

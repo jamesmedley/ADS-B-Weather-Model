@@ -41,7 +41,8 @@ def plot_training(csv_path, out_path=None, dpi=150):
     sigma_speed = to_array(rows, 'sigma_speed_kt')
     sigma_dir = to_array(rows, 'sigma_dir_deg')
 
-    best_mask = np.array([int(r.get('best_so_far', '0')) for r in rows], dtype=bool)
+    best_mask = np.array(
+        [int(r.get('best_so_far', '0')) for r in rows], dtype=bool)
     best_epoch = epoch[best_mask][0] if best_mask.any() else epoch[-1]
     best_idx = np.searchsorted(epoch, best_epoch)
 

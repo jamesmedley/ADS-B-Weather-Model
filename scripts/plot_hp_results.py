@@ -27,7 +27,9 @@ best_hyperparameters = {
     "Learning Rate": result.x[0],
     "Hidden": result.x[1],
     "Batch": result.x[2],
-    "Layers": result.x[3],
+    "Latent Layers": result.x[3],
+    "Det Layers": result.x[4],
+    "Latent Dim": result.x[5],
 }
 
 print("Best Hyperparameters:")
@@ -40,13 +42,14 @@ with open(os.path.join(args.out_dir, 'best_hyperparameters.txt'), 'w') as f:
         f.write(f"{param}: {value}\n")
 
 param_names = [
-    "Learning Rate", "Hidden", "Batch", "Layers",
+    "Learning Rate", "Hidden", "Batch", "Latent Layers",
+    "Det Layers", "Latent Dim",
 ]
 
 plt.figure(figsize=(12, 8))
 plot_convergence(result)
 plt.xlabel(r"Number of calls, n", fontsize=16)
-plt.ylabel("Min f(x) after n calls", fontsize=16)
+plt.ylabel("Min composite after n calls", fontsize=16)
 plt.xticks(fontsize=14)
 plt.yticks(fontsize=14)
 plt.title("Convergence Plot", fontsize=20)

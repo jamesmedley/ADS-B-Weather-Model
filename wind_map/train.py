@@ -5,6 +5,7 @@ wind_map.train — Training loop for the Wind ANP.
 import os
 import csv
 import copy
+import logging
 import math
 from contextlib import nullcontext
 
@@ -15,6 +16,7 @@ from torch.optim.lr_scheduler import (
 )
 from tqdm import tqdm
 
+from wind_map.logging import setup_logging
 from wind_map.network import LatentModel
 from wind_map.preprocess import (
     WindSnapshotDataset, day_grouped_split,
@@ -107,7 +109,8 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
           use_amp=True,
           weight_decay=1e-5,
           use_dist_bias=True,
-          num_decoder_layers=3):
+          num_decoder_layers=3,
+          log_file=None):
     """
     Train the Wind ANP.
 
@@ -119,9 +122,11 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
 
     use_amp: use automatic mixed precision (1.5-3x speedup).
 
-    Returns dict with: best_val_loss, best_epoch,
+    Returns dict with: best_val_loss, best_composite,
+    best_speed_mae, best_dir_mae, best_epoch,
     checkpoint_path, test_loss.
     """
+    setup_logging(log_file)
     device = t.device(
         'cuda' if t.cuda.is_available() else 'cpu')
     if verbose:
@@ -205,8 +210,12 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
     else:
         amp_dtype = None
         scaler = None
-        if use_amp and verbose:
-            print("  AMP requested but CUDA unavailable.")
+        if use_amp:
+            if verbose:
+                print("  AMP requested but CUDA unavailable.")
+            logging.warning(
+                "AMP requested but CUDA unavailable; "
+                "running without mixed precision.")
 
     steps_per_epoch = len(train_loader)
     if warmup_frac is not None:
@@ -237,6 +246,9 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
     global_step = 0
     best_val_loss = float('inf')
     best_epoch = None
+    best_composite = float('inf')
+    best_speed_mae = 0.0
+    best_dir_mae = 0.0
     best_state_dict = None
     epochs_since_improvement = 0
     log_interval = 50
@@ -295,6 +307,15 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
                     context_mask=context_mask,
                     target_mask=target_mask,
                     kl_weight=kl_weight)
+
+            if not t.isfinite(loss).item():
+                if verbose:
+                    pbar.set_postfix(loss="NaN(skip)")
+                logging.warning(
+                    "Non-finite loss at step %d "
+                    "(batch skipped).", global_step)
+                optim.zero_grad(set_to_none=True)
+                continue
 
             optim.zero_grad(set_to_none=True)
             if scaler is not None:
@@ -388,22 +409,24 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
                     n_batches += 1
 
                 # Reconstruction NLL
-                dist = t.distributions.Normal(mu, sigma)
+                dist = t.distributions.Normal(
+                    mu, sigma, validate_args=False)
                 log_p = dist.log_prob(target_y).sum(dim=-1)
                 n_valid = mask_f.sum()
                 val_nll_sum += (-log_p * mask_f).sum().item()
                 n_points += n_valid.item()
 
                 # Physical-space metrics (on CPU)
-                mu_np = mu.cpu().numpy()
-                sigma_np = sigma.cpu().numpy()
+                mu_np = mu.detach().cpu().float().numpy()
+                sigma_np = sigma.detach().cpu().float().numpy()
                 target_y_np = target_y.cpu().numpy()
                 mask_np = target_mask.cpu().numpy().astype(bool)
 
                 sin_pred, cos_pred, spd_norm_pred = (
                     mu_np[..., 0], mu_np[..., 1], mu_np[..., 2])
                 sin_true, cos_true, spd_norm_true = (
-                    target_y_np[..., 0], target_y_np[..., 1], target_y_np[..., 2])
+                    target_y_np[..., 0], target_y_np[..., 1],
+                    target_y_np[..., 2])
 
                 pred_dir = np.degrees(
                     np.arctan2(sin_pred, cos_pred)) % 360
@@ -427,7 +450,8 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
                 dir_abs_err_sum += dir_err[m].sum()
 
                 # Coverage: 1σ / 2σ intervals via delta-method approximation
-                R2 = sin_pred ** 2 + cos_pred ** 2 + 1e-9
+                R2 = np.maximum(
+                    sin_pred ** 2 + cos_pred ** 2, 1e-6)
                 var_dir_rad = (
                     ((cos_pred / R2) * sigma_np[..., 0]) ** 2
                     + ((sin_pred / R2) * sigma_np[..., 1]) ** 2)
@@ -439,7 +463,9 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
 
                 cov_68_sum += (np.abs(speed_err[m]) <= std_speed_kt[m]).sum()
                 cov_68_sum += (dir_err[m] <= std_dir_deg[m]).sum()
-                cov_95_sum += (np.abs(speed_err[m]) <= 2 * std_speed_kt[m]).sum()
+                cov_95_sum += (
+                    (np.abs(speed_err[m])
+                     <= 2 * std_speed_kt[m]).sum())
                 cov_95_sum += (dir_err[m] <= 2 * std_dir_deg[m]).sum()
 
                 # Mean predicted sigma in physical units
@@ -454,6 +480,7 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
         speed_rmse = math.sqrt(speed_sq_err_sum / n_points)
         speed_mae = speed_abs_err_sum / n_points
         dir_mae = dir_abs_err_sum / n_points
+        composite = speed_mae + dir_mae / 4.0
         cov_68 = cov_68_sum / (2 * n_points)
         cov_95 = cov_95_sum / (2 * n_points)
         mean_sigma_speed = sigma_speed_sum / n_points
@@ -479,12 +506,19 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
                 f"  val_kl={avg_kl:.4f}"
                 f"  speed_rmse={speed_rmse:.2f}kt"
                 f"  speed_mae={speed_mae:.2f}kt"
-                f"  dir_mae={dir_mae:.1f}°"
+                f"  dir_mae={dir_mae:.1f} deg"
                 f"  cov_68={cov_68:.1%}"
                 f"  cov_95={cov_95:.1%}"
                 f"  active={active_pct:.0f}%"
-                f"  σ_s={mean_sigma_speed:.2f}kt"
-                f"  σ_d={mean_sigma_dir:.1f}°")
+                f"  sigma_s={mean_sigma_speed:.2f}kt"
+                f"  sigma_d={mean_sigma_dir:.1f} deg")
+
+        # Track best composite metric (for HP search, independent
+        # of checkpoint/early-stop)
+        if composite < best_composite:
+            best_composite = composite
+            best_speed_mae = speed_mae
+            best_dir_mae = dir_mae
 
         # Write CSV row
         if csv_path is not None:
@@ -498,7 +532,8 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
                     f'{avg_nll:.6f}', f'{avg_kl:.6f}',
                     f'{speed_rmse:.4f}', f'{speed_mae:.4f}', f'{dir_mae:.4f}',
                     f'{cov_68:.6f}', f'{cov_95:.6f}',
-                    f'{active_pct:.2f}', f'{kl_max_dim:.6f}', f'{kl_min_dim:.6f}',
+                    f'{active_pct:.2f}', f'{kl_max_dim:.6f}',
+                    f'{kl_min_dim:.6f}',
                     f'{mean_sigma_speed:.4f}', f'{mean_sigma_dir:.4f}',
                     '1' if is_best else '0',
                 ])
@@ -529,7 +564,9 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
                     'norm_params': norm_params.to_dict(),
                     'hparams': {
                         'num_hidden': num_hidden,
-                        'num_latents': num_latents if num_latents is not None else num_hidden,
+                        'num_latents': (
+                            num_latents if num_latents is not None
+                            else num_hidden),
                         'latent_layers': latent_layers,
                         'deterministic_layers': deterministic_layers,
                         'dropout': dropout,
@@ -569,6 +606,10 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
                         f"(patience={patience}). "
                         f"Early stop at "
                         f"epoch {epoch}.")
+                logging.warning(
+                    "No improvement for %d epochs "
+                    "(patience=%d). Early stop at epoch %d.",
+                    epochs_since_improvement, patience, epoch)
                 break
 
     if verbose:
@@ -617,6 +658,9 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
 
     return {
         'best_val_loss': best_val_loss,
+        'best_composite': best_composite,
+        'best_speed_mae': best_speed_mae,
+        'best_dir_mae': best_dir_mae,
         'best_epoch': best_epoch,
         'checkpoint_path': best_ckpt_path,
         'test_loss': avg_test,

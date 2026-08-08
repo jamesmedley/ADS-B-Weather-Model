@@ -9,6 +9,7 @@ For the train() function directly, see wind_map.train.
 
 import argparse
 
+from wind_map.logging import run_script
 from wind_map.train import train
 
 
@@ -73,9 +74,13 @@ if __name__ == '__main__':
     parser.add_argument(
         '--no_dist_bias', action='store_true',
         help='Disable distance bias in cross-attention')
+    parser.add_argument(
+        '--log_file', default=None,
+        help='Path to the universal log file '
+             '(default: run.log in the project root)')
     args = parser.parse_args()
 
-    train(
+    run_script(lambda: train(
         cache_dir=args.cache,
         num_hidden=args.hidden,
         num_latents=args.num_latents,
@@ -97,4 +102,5 @@ if __name__ == '__main__':
         use_amp=not args.no_amp,
         weight_decay=args.weight_decay,
         use_dist_bias=not args.no_dist_bias,
-    )
+        log_file=args.log_file,
+    ))

@@ -132,9 +132,10 @@ class ParticleSwarm:
 
 def build_wind_gif(checkpoint, alt_ft, context, n_samples,
                    n_lat, n_lon, output,
-                   num_hidden, num_latents=None,
+                   num_hidden, n_particles, n_frames,
+                   fps, dt_seconds, trail_len,
+                   num_latents=None,
                    latent_layers=4, deterministic_layers=4,
-                   n_particles, n_frames, fps, dt_seconds, trail_len,
                    snapshot_id=None, snapshot_time=None,
                    params=None,
                    lat_range_deg=None, lon_range_deg=None, seed=0,
@@ -358,7 +359,8 @@ if __name__ == "__main__":
     p.add_argument("--output", default="outputs/imgs/wind_flow.gif")
     p.add_argument("--hidden", type=int, default=128)
     p.add_argument("--num_latents", type=int, default=None,
-                   help='Number of latent dimensions (default: same as --hidden)')
+                   help=('Number of latent dimensions '
+                         '(default: same as --hidden)'))
     p.add_argument("--latent_layers", type=int, default=4)
     p.add_argument("--deterministic_layers", type=int, default=4)
     p.add_argument('--decoder_layers', type=int, default=None,

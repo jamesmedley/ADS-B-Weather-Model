@@ -8,6 +8,8 @@ wind_map.egg-info/
 
 outputs/runs/
 
+run.log
+
 note.txt
 best_hyperparameters.txt
 hp_optim_results.pkl

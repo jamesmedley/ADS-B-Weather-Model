@@ -90,8 +90,9 @@ def evaluate(checkpoint_path, cache_dir, split='test', num_hidden=None,
 
         mu_samples, sigma_samples = [], []
         for _ in range(n_samples):
-            mu, sigma, _, _, _ = model(context_x, context_y, target_x,
-                                       target_y=None, context_mask=context_mask)
+            mu, sigma, _, _, _ = model(
+                context_x, context_y, target_x,
+                target_y=None, context_mask=context_mask)
             mu_samples.append(mu)
             sigma_samples.append(sigma)
 
