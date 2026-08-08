@@ -41,7 +41,8 @@ def evaluate(params_path, cache_dir, split="test", context_frac=0.5,
         hp["lengthscales"], hp["amplitudes"], hp["noises"])
     params = load_params(cache_dir)
 
-    train_ids, val_ids, test_ids = day_grouped_split(cache_dir, seed=split_seed)
+    train_ids, val_ids, test_ids = day_grouped_split(
+        cache_dir, seed=split_seed)
     ids = {"train": train_ids, "val": val_ids, "test": test_ids}[split]
     ds = WindSnapshotDataset(cache_dir, snapshot_ids=ids)
 
@@ -81,9 +82,11 @@ def evaluate(params_path, cache_dir, split="test", context_frac=0.5,
 
             pred_dir = np.degrees(np.arctan2(mean[:, 0], mean[:, 1])) % 360
             true_dir = np.degrees(np.arctan2(y_t[:, 0], y_t[:, 1])) % 360
-            pred_log_spd = mean[:, 2] * params.log_speed_std + params.log_speed_mean
+            pred_log_spd = (mean[:, 2] * params.log_speed_std
+                            + params.log_speed_mean)
             pred_speed = np.exp(pred_log_spd) - 1
-            true_log_spd = y_t[:, 2] * params.log_speed_std + params.log_speed_mean
+            true_log_spd = (y_t[:, 2] * params.log_speed_std
+                            + params.log_speed_mean)
             true_speed = np.exp(true_log_spd) - 1
 
             speed_err = pred_speed - true_speed
@@ -135,8 +138,8 @@ def evaluate(params_path, cache_dir, split="test", context_frac=0.5,
               f"coverage_95={metrics['coverage_95']:.2%}  "
               f"(n={metrics['n_held_out_points']} pts / "
               f"{metrics['n_snapshots']} snapshots)")
-        print("  NOTE: ANP test.py reports a K-sample marginal NLL; the GP NLL "
-              "is exact. Compare MAE/RMSE/coverage primarily.")
+        print("  NOTE: ANP test.py reports a K-sample marginal NLL; "
+              "the GP NLL is exact. Compare MAE/RMSE/coverage primarily.")
     return metrics
 
 

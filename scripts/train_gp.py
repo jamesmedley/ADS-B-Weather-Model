@@ -19,12 +19,15 @@ import time
 import numpy as np
 
 from wind_map.gp import fit_hyperparameters, cache_x_to_gp_x
-from wind_map.preprocess import day_grouped_split, WindSnapshotDataset, load_params
+from wind_map.preprocess import (
+    day_grouped_split, WindSnapshotDataset, load_params,
+)
 
 
 def main():
     p = argparse.ArgumentParser(
-        description="Fit global GP kernel hyperparameters for the wind GP baseline.")
+        description="Fit global GP kernel hyperparameters for the "
+                    "wind GP baseline.")
     p.add_argument("--cache", required=True,
                    help="Path to the .npy cache built by convert_db.py")
     p.add_argument("--out", default="checkpoint/gp_params.json")
@@ -76,9 +79,12 @@ def main():
     dt = time.time() - t0
 
     print(f"Fit in {dt:.1f}s  mll={mll_per_pt:+.4f} nats/point")
-    print(f"  lengthscales (km): [{', '.join(f'{v:.1f}' for v in lengthscales)}]")
-    print(f"  amplitudes:        [{', '.join(f'{v:.3f}' for v in amplitudes)}]")
-    print(f"  noises:            [{', '.join(f'{v:.3f}' for v in noises)}]")
+    ls_str = ', '.join(f'{v:.1f}' for v in lengthscales)
+    amp_str = ', '.join(f'{v:.3f}' for v in amplitudes)
+    noi_str = ', '.join(f'{v:.3f}' for v in noises)
+    print(f"  lengthscales (km): [{ls_str}]")
+    print(f"  amplitudes:        [{amp_str}]")
+    print(f"  noises:            [{noi_str}]")
 
     out = {
         "lengthscales": [float(v) for v in lengthscales],

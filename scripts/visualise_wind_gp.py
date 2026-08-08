@@ -24,12 +24,14 @@ _REPO = os.path.dirname(_HERE)
 if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
-from wind_map.gp import GaussianProcessPredictor
-from wind_map.preprocess import load_params, KM_PER_DEG_LAT
-from wind_map.utils import (
+from wind_map.gp import GaussianProcessPredictor  # noqa: E402
+from wind_map.preprocess import load_params, KM_PER_DEG_LAT  # noqa: E402
+from wind_map.utils import (  # noqa: E402
     pick_snapshot, make_grid, lonlat_to_mercator, wind_to_uv,
 )
-from scripts.visualise_wind import _save_basemap, _save_uncertainty
+from scripts.visualise_wind import (  # noqa: E402
+    _save_basemap, _save_uncertainty,
+)
 
 
 def plot_wind_gp(params_path, alt_ft, context, n_lat, n_lon,
@@ -134,7 +136,8 @@ if __name__ == "__main__":
                    help="Path to gp_params.json from train_gp.py")
     p.add_argument("--alt_ft", type=float, default=35000)
     p.add_argument("--output", default="outputs/imgs/wind_field_gp.png",
-                   help="Base output path; saves _uncertainty and _basemap variants")
+                   help="Base output path; saves _uncertainty "
+                        "and _basemap variants")
     p.add_argument("--samples", type=int, default=1000,
                    help="Accepted for parity with visualise_wind.py (ignored)")
     p.add_argument("--grid_lat", type=int, default=25)

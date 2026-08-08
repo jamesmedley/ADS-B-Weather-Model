@@ -2,7 +2,8 @@
 gp.py — Exact multi-output Gaussian Process baseline for wind prediction.
 
 A comparison baseline for the Attentive Neural Process (ANP) in this repo.
-Entry points: scripts/train_gp.py, scripts/test_gp.py, scripts/visualise_wind_gp.py.
+Entry points: scripts/train_gp.py, scripts/test_gp.py, scripts/
+visualise_wind_gp.py (see scripts/ for usage).
 
 Data representation
 -------------------
@@ -144,7 +145,8 @@ def _ard_squared_dist(x1, x2, inv_l2):
 def _matern52_corr(d2):
     """Matérn-5/2 correlation function of squared distance d2."""
     r = np.sqrt(np.maximum(d2, 0.0))
-    return (1.0 + math.sqrt(5.0) * r + (5.0 / 3.0) * d2) * np.exp(-math.sqrt(5.0) * r)
+    return ((1.0 + math.sqrt(5.0) * r + (5.0 / 3.0) * d2)
+            * np.exp(-math.sqrt(5.0) * r))
 
 
 class GaussianProcessRegressor:
@@ -182,7 +184,8 @@ class GaussianProcessRegressor:
     def predict(self, X_star):
         """Return (mean, total_var, latent_var), each [N, 3]."""
         if not self._fitted:
-            raise RuntimeError("GaussianProcessRegressor.fit() must be called first.")
+            raise RuntimeError(
+                "GaussianProcessRegressor.fit() must be called first.")
         X_star = np.asarray(X_star, dtype=np.float64)
         n = X_star.shape[0]
         d2 = _ard_squared_dist(X_star, self.X, self.inv_l2)
@@ -209,7 +212,8 @@ class GaussianProcessRegressor:
 # ---------------------------------------------------------------------------
 
 def _pack_snapshots(snapshots, max_m):
-    """snapshots: list of (x [m, 3], y [m, 3]) float64 arrays -> padded tensors."""
+    """snapshots: list of (x [m, 3], y [m, 3]) float64 arrays
+    -> padded tensors."""
     S = len(snapshots)
     X = t.zeros(S, max_m, 3, dtype=t.float64)
     Y = t.zeros(S, max_m, 3, dtype=t.float64)
@@ -237,19 +241,20 @@ def _snapshot_ll(X, Y, mask, log_lengthscales, log_amplitudes, log_noises,
     # sqrt: the Matérn kernel's analytic gradient at r=0 is 0, but autograd
     # would compute d(r)/d(d2)=inf there and produce NaN.
     r = d2.clamp(min=1e-12).sqrt()
-    k0 = (1.0 + math.sqrt(5.0) * r + (5.0 / 3.0) * d2) * t.exp(-math.sqrt(5.0) * r)
+    k0 = ((1.0 + math.sqrt(5.0) * r + (5.0 / 3.0) * d2)
+          * t.exp(-math.sqrt(5.0) * r))
 
     pair_mask = (mask[:, :, None] & mask[:, None, :]).to(t.float64)
-    I = t.eye(M, dtype=t.float64)
+    eye = t.eye(M, dtype=t.float64)
     noise2 = t.exp(2.0 * log_noises)
     amp2 = t.exp(2.0 * log_amplitudes)
 
     ll = t.zeros(S, dtype=t.float64)
     for j in range(3):
         K = amp2[j] * k0
-        K = K * pair_mask + I * (1.0 - pair_mask)
+        K = K * pair_mask + eye * (1.0 - pair_mask)
         K = K + noise2[j] * t.diag_embed(mask.to(t.float64))
-        K = K + jitter * I
+        K = K + jitter * eye
         L = t.linalg.cholesky(K)
         logdet = 2.0 * L.diagonal(dim1=-2, dim2=-1).log().sum(dim=-1)
         Yj = Y[..., j].unsqueeze(-1)          # [S, M, 1]
@@ -302,12 +307,14 @@ def fit_hyperparameters(snapshots, n_steps=800, lr=0.05, seed=0,
                     log_amp.detach().clone(), log_noi.detach().clone())
         if verbose and step % 100 == 0:
             n_pts = int(mask.sum().item())
-            print(f"  step {step:4d}/{n_steps}  mll={ll.item() / n_pts:+.4f} nats/point")
+            print(f"  step {step:4d}/{n_steps}  "
+                  f"mll={ll.item() / n_pts:+.4f} nats/point")
 
     _, log_ls, log_amp, log_noi = best
 
     with t.no_grad():
-        ll_s = _snapshot_ll(X, Y, mask, log_ls, log_amp, log_noi, jitter=jitter)
+        ll_s = _snapshot_ll(X, Y, mask, log_ls, log_amp, log_noi,
+                            jitter=jitter)
     counts = mask.sum(dim=-1).to(t.float64)
     # Remove the per-output (M - m_i) constants from padding:
     #   + 0.5 (M-m_i) log(2*pi)  (from the M*log(2*pi) term)
@@ -358,7 +365,8 @@ class GaussianProcessPredictor:
             observations, self.params, altitude_km=self._altitude_km())
         ys = np.empty((len(observations), 3), dtype=np.float64)
         for i, obs in enumerate(observations):
-            ys[i] = encode_wind(obs["wind_dir"], obs["wind_speed"], self.params)
+            ys[i] = encode_wind(
+                obs["wind_dir"], obs["wind_speed"], self.params)
         return xs, ys
 
     def _encode_queries(self, queries):
@@ -377,7 +385,8 @@ class GaussianProcessPredictor:
 
         sin_m, cos_m, spd_m = mean[:, 0], mean[:, 1], mean[:, 2]
         dirs = np.degrees(np.arctan2(sin_m, cos_m)) % 360
-        log_speed = spd_m * self.params.log_speed_std + self.params.log_speed_mean
+        log_speed = (spd_m * self.params.log_speed_std
+                     + self.params.log_speed_mean)
         speeds = np.exp(log_speed) - 1
 
         R2 = sin_m ** 2 + cos_m ** 2 + 1e-9
@@ -388,7 +397,8 @@ class GaussianProcessPredictor:
             return np.degrees(np.sqrt(w_sin * var_sin + w_cos * var_cos))
 
         def _spd_std(var_spd):
-            return np.sqrt(var_spd) * self.params.log_speed_std * np.exp(log_speed)
+            return (np.sqrt(var_spd) * self.params.log_speed_std
+                    * np.exp(log_speed))
 
         n = mean.shape[0]
         ale_sin = noise2[0] * np.ones(n)
