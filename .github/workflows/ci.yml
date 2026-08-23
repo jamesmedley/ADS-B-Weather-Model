@@ -40,7 +40,8 @@ jobs:
         run: >
           docker run --rm -v "$PWD":/workspace -w /workspace
           wind-map-ci:latest
-          bash -lc "set -o pipefail; mkdir -p ci-artifacts; pytest
+          bash -lc "set -o pipefail; mkdir -p ci-artifacts;
+          python -m pytest
           --junitxml=ci-artifacts/junit.xml --cov=wind_map
           --cov-report=term-missing
           --cov-report=xml:ci-artifacts/coverage.xml
