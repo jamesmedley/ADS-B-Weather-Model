@@ -15,7 +15,15 @@ note.txt
 best_hyperparameters.txt
 hp_optim_results.pkl
 diagnose.py
+# Machine-specific Dockerfile for the compute server (private paths).
+# The generic, tracked image definition lives in Dockerfile.ci.
 Dockerfile
-requirements.txt
 training_log.csv
 outputs/imgs/train_behaviour.png
+
+# Test / CI outputs
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+ci-artifacts/
