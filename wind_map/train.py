@@ -8,6 +8,7 @@ import copy
 import logging
 import math
 from contextlib import nullcontext
+from functools import partial
 
 import numpy as np
 import torch as t
@@ -23,7 +24,7 @@ from wind_map.preprocess import (
     collate_fn, collate_fn_val, _worker_init,
     load_params,
 )
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 
 class EMA:
@@ -96,6 +97,45 @@ def _save_checkpoint(path, ckpt):
     os.replace(tmp, path)
 
 
+class _IndexedDataset(Dataset):
+    """Wraps a dataset to yield (index, x, y) so the collate function can
+    look up frozen per-item context/target partitions."""
+
+    def __init__(self, ds):
+        self.ds = ds
+
+    def __len__(self):
+        return len(self.ds)
+
+    def __getitem__(self, i):
+        x, y = self.ds[i]
+        return i, x, y
+
+
+def _fixed_val_partitions(ds, seed, context_frac=0.5):
+    """Draw one disjoint context/target split per snapshot, then freeze it.
+
+    Re-randomising the validation split every epoch (fresh randperm inside
+    the collate workers) makes val_loss a noisy, non-comparable statistic:
+    best-epoch selection and early stopping fire partly on redraw luck.
+    Drawing each snapshot's partition once here — with the same index
+    arithmetic as collate_fn_val — makes every epoch evaluate identical
+    context/target assignments.
+    """
+    rng = np.random.default_rng(seed)
+    partitions = {}
+    for i in range(len(ds)):
+        n = ds[i][0].size(0)
+        if n < 2:
+            partitions[i] = (
+                t.zeros(0, dtype=t.long), t.zeros(0, dtype=t.long))
+            continue
+        n_ctx = max(1, min(int(n * context_frac), n - 1))
+        perm = t.from_numpy(rng.permutation(n)).long()
+        partitions[i] = (perm[:n_ctx], perm[n_ctx:])
+    return partitions
+
+
 def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
           batch_size=16, num_workers=4,
           latent_layers=4, deterministic_layers=4, dropout=0.0,
@@ -110,6 +150,8 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
           weight_decay=1e-5,
           use_dist_bias=True,
           num_decoder_layers=3,
+          use_coupled_rotation=False,
+          seed=0,
           log_file=None):
     """
     Train the Wind ANP.
@@ -122,11 +164,22 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
 
     use_amp: use automatic mixed precision (1.5-3x speedup).
 
+    use_coupled_rotation: coupled rotation augmentation (rigidly
+    rotates positions and wind vectors together by a random
+    per-snapshot angle), passed to the training collate_fn
+    (see wind_map.preprocess.collate_fn).
+
+    seed: master RNG seed for reproducible runs.
+
     Returns dict with: best_val_loss, best_composite,
     best_speed_mae, best_dir_mae, best_epoch,
     checkpoint_path, test_loss.
     """
     setup_logging(log_file)
+    np.random.seed(seed)
+    t.manual_seed(seed)
+    if t.cuda.is_available():
+        t.cuda.manual_seed_all(seed)
     device = t.device(
         'cuda' if t.cuda.is_available() else 'cpu')
     if verbose:
@@ -148,13 +201,20 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
 
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
-        collate_fn=collate_fn, num_workers=num_workers,
+        collate_fn=partial(
+            collate_fn,
+            use_coupled_rotation=use_coupled_rotation),
+        num_workers=num_workers,
         persistent_workers=use_persistent_workers,
         worker_init_fn=_worker_init,
         pin_memory=(device.type == 'cuda'))
+    # Frozen validation partitions: drawn once so every epoch evaluates
+    # identical context/target assignments (see _fixed_val_partitions).
+    val_partitions = _fixed_val_partitions(val_ds, seed=split_seed)
     val_loader = DataLoader(
-        val_ds, batch_size=batch_size, shuffle=False,
-        collate_fn=collate_fn_val, num_workers=num_workers,
+        _IndexedDataset(val_ds), batch_size=batch_size, shuffle=False,
+        collate_fn=partial(collate_fn_val, partitions=val_partitions),
+        num_workers=num_workers,
         persistent_workers=use_persistent_workers,
         worker_init_fn=_worker_init,
         pin_memory=(device.type == 'cuda'))
@@ -356,7 +416,7 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
         ema.apply_shadow(model)
         model.eval()
 
-        val_loss_sum = 0.0
+        val_kl_pt_sum = 0.0
         val_nll_sum = 0.0
         val_kl_sum = 0.0
         n_points = 0
@@ -390,13 +450,12 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
                         context_mask=context_mask,
                         target_mask=target_mask)
 
-                val_loss_sum += loss.item()
-
                 mask_f = target_mask.to(mu.dtype)
 
                 # Per-target-point KL (clamped)
                 kl_valid = (kl * mask_f).sum() / mask_f.sum().clamp(min=1.0)
                 val_kl_sum += kl_valid.item()
+                val_kl_pt_sum += (kl * mask_f).sum().item()
 
                 # Per-dimension KL (unclamped) for active dim tracking
                 if kl_per_dim is not None:
@@ -474,8 +533,15 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
 
         ema.restore(model)
 
-        avg_val = val_loss_sum / len(val_loader)
-        avg_nll = val_nll_sum / n_points
+        avg_nll = (val_nll_sum / n_points
+                   if n_points > 0 else float('nan'))
+        # Point-weighted val loss: every valid target point contributes
+        # equally across the whole pass (recon NLL + free-bits-clamped KL),
+        # instead of a mean of batch means that weights snapshots by
+        # batching luck. Uses the same frozen partitions every epoch, so
+        # values are directly comparable across epochs.
+        avg_val = avg_nll + (
+            val_kl_pt_sum / n_points if n_points > 0 else 0.0)
         avg_kl = val_kl_sum / n_batches if n_batches > 0 else 0.0
         speed_rmse = math.sqrt(speed_sq_err_sum / n_points)
         speed_mae = speed_abs_err_sum / n_points
@@ -578,6 +644,8 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
                         'weight_decay': weight_decay,
                         'use_dist_bias': use_dist_bias,
                         'num_decoder_layers': num_decoder_layers,
+                        'use_coupled_rotation': use_coupled_rotation,
+                        'seed': seed,
                     },
                 }
                 ema.restore(model)

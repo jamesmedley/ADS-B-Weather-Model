@@ -101,6 +101,14 @@ python scripts/visualise_uncertainty.py --checkpoint checkpoint/best_model.pth.t
 
 Side-by-side aleatoric vs epistemic maps. Add `--average` to average over all snapshots in the split.
 
+### Plot aircraft tracks as a Strava-style heatmap
+
+```bash
+python scripts/heatmap_aircraft.py --db data/adsb.db --out-dir outputs/imgs
+```
+
+Reconstructs per-aircraft flight tracks from the raw observations and renders a glowing density heatmap (blue glow by default) on a black background. Writes one image per flight-level altitude band plus `aircraft_heatmap_all.png` for all altitudes. Controls: `--bands 0,10000,20000,30000,40000,100000`, `--gap_s 300` (track break in seconds), `--pixels 2000`, `--blur 1.5`, `--cmap {blue,white,heat,mag}`, `--grid` for a single montage, and `--start/--end/--min_rssi` to filter the time window or receiver quality.
+
 ### Analyse wind variability
 
 ```bash

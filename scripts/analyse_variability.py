@@ -7,8 +7,9 @@ No model loaded — only looks at the .npy cache to check:
   2. Lat/altitude joint density (is there a confound?)
 
 Usage:
-    python analyse_variability.py --cache data/npy_cache \
-        --alt_ft 36000 --output outputs/imgs/wind_variability.png
+    python visualise_uncertainty_components.py \
+            --checkpoint best.pth.tar --cache data/npy_cache \
+            --alt_ft 35000 --average --output avg_uncertainty.png
 """
 
 import argparse

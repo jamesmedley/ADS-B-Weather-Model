@@ -2,6 +2,7 @@ checkpoint/
 data/
 examples/
 *.pyc
+*.gif
 __pycache__/
 .idea/
 wind_map.egg-info/

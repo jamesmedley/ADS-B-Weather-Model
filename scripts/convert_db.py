@@ -6,6 +6,12 @@ SQLite is fine for ingestion but too slow for DataLoader random-access reads.
 This script does the scan and normalisation once, writing memory-mappable
 numpy arrays so training never touches SQLite.
 
+Normalisation statistics are fitted on train days only: the same
+deterministic day-grouped split used during training (seed 42 by default)
+is computed first, and centre/range/speed statistics come from those
+snapshots alone. Val/test weather therefore never influences the input
+encoding or target scaling.
+
 Cache layout (written to --out):
     x.npy            float32 [N, 3]  lat_norm, lon_norm, alt_norm
     y.npy            float32 [N, 3]  wind_dir_sin, wind_dir_cos,
@@ -29,7 +35,7 @@ import numpy as np
 
 from wind_map.preprocess import (
     normalise_coords, encode_wind, MIN_AIRCRAFT,
-    NormParams, KM_PER_DEG_LAT,
+    NormParams, KM_PER_DEG_LAT, split_snapshot_ids,
 )
 
 
@@ -72,7 +78,8 @@ def _all_valid_rows_by_snapshot(con):
     return by_snapshot
 
 
-def convert(db_path, out_dir, min_aircraft=MIN_AIRCRAFT):
+def convert(db_path, out_dir, min_aircraft=MIN_AIRCRAFT,
+            split_seed=42, train_frac=0.8, test_frac=0.1, val_frac=0.1):
     t0 = time.time()
     os.makedirs(out_dir, exist_ok=True)
 
@@ -89,15 +96,28 @@ def convert(db_path, out_dir, min_aircraft=MIN_AIRCRAFT):
     rows_by_snapshot = _all_valid_rows_by_snapshot(con)
     con.close()
 
-    # --- Compute data-driven normalisation parameters ---
-    all_rows = [
-        row for rows in rows_by_snapshot.values() for row in rows
+    # --- Day-grouped split (same algorithm/seed as training) ---
+    # Fitted on train days only so aggregate statistics of val/test
+    # weather never shape the input encoding or target scaling.
+    train_ids_split, _, _ = split_snapshot_ids(
+        snapshot_ids, snapshot_times,
+        train_frac=train_frac, test_frac=test_frac,
+        val_frac=val_frac, seed=split_seed, verbose=True)
+    train_day_ids = set(train_ids_split)
+    n_train_snapshots = len(train_day_ids)
+
+    # --- Compute data-driven normalisation parameters (train days only) ---
+    train_rows = [
+        row for sid in train_day_ids
+        for row in rows_by_snapshot.get(sid, [])
     ]
-    all_arr = np.array(all_rows, dtype=np.float64)
-    all_lats = all_arr[:, 0]
-    all_lons = all_arr[:, 1]
-    all_alts = all_arr[:, 2]
-    all_ws = all_arr[:, 4]
+    if not train_rows:
+        raise RuntimeError("No valid observations on train days.")
+    train_arr = np.array(train_rows, dtype=np.float64)
+    all_lats = train_arr[:, 0]
+    all_lons = train_arr[:, 1]
+    all_alts = train_arr[:, 2]
+    all_ws = train_arr[:, 4]
 
     centre_lat = float(np.median(all_lats))
     centre_lon = float(np.median(all_lons))
@@ -170,6 +190,14 @@ def convert(db_path, out_dir, min_aircraft=MIN_AIRCRAFT):
         'num_empty_snapshots': empty_snapshots,
         'num_observations': int(total_rows),
         'normalisation': params.to_dict(),
+        'norm_fit': {
+            'scope': 'train_days_only',
+            'split_seed': split_seed,
+            'train_frac': train_frac,
+            'test_frac': test_frac,
+            'val_frac': val_frac,
+            'n_train_snapshots': n_train_snapshots,
+        },
         'created': time.strftime('%Y-%m-%d %H:%M:%S'),
     }
     with open(os.path.join(out_dir, 'meta.json'), 'w') as f:
@@ -178,6 +206,8 @@ def convert(db_path, out_dir, min_aircraft=MIN_AIRCRAFT):
     dt = time.time() - t0
     print(f"  {len(snapshot_ids)} snapshots  ({empty_snapshots} empty)")
     print(f"  {total_rows} observations written")
+    print(f"  normalisation fitted on {n_train_snapshots} train-day "
+          f"snapshots (seed {split_seed})")
     print(f"  centre: ({centre_lat:.4f}, {centre_lon:.4f})  "
           f"range_km: {range_km:.1f}  max_alt: {max_alt_ft:.0f} ft")
     print(f"  wind speed: mean={params.wind_speed_mean_kt:.2f} kt  "
@@ -215,6 +245,28 @@ if __name__ == '__main__':
             f' (default: {MIN_AIRCRAFT})'
         )
     )
+    parser.add_argument(
+        '--split_seed', type=int, default=42,
+        help=(
+            'Seed for the day-grouped split used to select the '
+            'train days that normalisation statistics are fitted '
+            'on (must match training; default: 42)'
+        )
+    )
+    parser.add_argument(
+        '--train_frac', type=float, default=0.8,
+        help='Train fraction for the norm-fit split (default: 0.8)'
+    )
+    parser.add_argument(
+        '--test_frac', type=float, default=0.1,
+        help='Test fraction for the norm-fit split (default: 0.1)'
+    )
+    parser.add_argument(
+        '--val_frac', type=float, default=0.1,
+        help='Val fraction for the norm-fit split (default: 0.1)'
+    )
     args = parser.parse_args()
 
-    convert(args.db, args.out, min_aircraft=args.min_aircraft)
+    convert(args.db, args.out, min_aircraft=args.min_aircraft,
+            split_seed=args.split_seed, train_frac=args.train_frac,
+            test_frac=args.test_frac, val_frac=args.val_frac)

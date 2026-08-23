@@ -198,37 +198,29 @@ def _closest_day_subset(day_sizes, target, rng):
     return dp[best_sum]
 
 
-def day_grouped_split(cache_dir, train_frac=0.8, test_frac=0.1, val_frac=0.1,
-                      seed=42):
-    """
-    Split snapshots into train/val/test by calendar day (every snapshot from a
-    given day goes to the same split). Uses DP subset-sum to hit the target
-    fractions as closely as possible.
+def split_snapshot_ids(ids, times, train_frac=0.8, test_frac=0.1,
+                       val_frac=0.1, seed=42, verbose=True):
+    """Split snapshot IDs into train/val/test by calendar day.
+
+    Every snapshot from a given calendar day goes to the same split; a DP
+    subset-sum over day sizes hits the target fractions as closely as
+    possible. Operates on plain ID/time lists so callers can use it before
+    the .npy cache exists (e.g. convert_db.py fitting normalisation on
+    train days only).
+
+    The RNG consumption order (shuffle orders, subset-sum picks) must not
+    change: existing seed-42 splits reproduce bit-for-bit.
     """
     total_frac = train_frac + test_frac + val_frac
     if abs(total_frac - 1.0) > 1e-6:
         raise ValueError(f"Fractions must sum to 1.0, got {total_frac}")
 
-    ids_path = os.path.join(cache_dir, 'snapshot_ids.npy')
-    times_path = os.path.join(cache_dir, 'snapshot_times.npy')
-    if not os.path.exists(ids_path):
-        raise RuntimeError(
-            f"No npy cache at '{cache_dir}'. "
-            "Run convert_db.py first.")
-    if not os.path.exists(times_path):
-        raise RuntimeError(
-            f"No snapshot_times.npy in '{cache_dir}'. "
-            "Re-run convert_db.py.")
-
-    ids = np.load(ids_path).tolist()
-    times = np.load(times_path).tolist()
     n = len(ids)
-    if n == 0:
-        raise RuntimeError("No snapshots in cache.")
     if len(times) != n:
         raise RuntimeError(
-            "snapshot_ids.npy and snapshot_times.npy "
-            "have mismatched lengths.")
+            "Snapshot IDs and times have mismatched lengths.")
+    if n == 0:
+        raise RuntimeError("No snapshots to split.")
 
     ids_by_day = {}
     for sid, t in zip(ids, times):
@@ -268,20 +260,48 @@ def day_grouped_split(cache_dir, train_frac=0.8, test_frac=0.1, val_frac=0.1,
     if not test_ids:
         raise RuntimeError("Test set is empty.")
 
-    n_train_days = len(train_idx)
-    n_test_days = len(test_idx)
-    n_val_days = len(remaining) - n_test_days
-    print(
-        f"Day-grouped split ({len(day_sizes)} days total): "
-        f"{len(train_ids)} train "
-        f"({len(train_ids) / n:.1%}, {n_train_days} days)  |  "
-        f"{len(val_ids)} val "
-        f"({len(val_ids) / n:.1%}, {n_val_days} days)  |  "
-        f"{len(test_ids)} test "
-        f"({len(test_ids) / n:.1%}, {n_test_days} days)  |  "
-        f"total {n} snapshots"
-    )
+    if verbose:
+        n_train_days = len(train_idx)
+        n_test_days = len(test_idx)
+        n_val_days = len(remaining) - n_test_days
+        print(
+            f"Day-grouped split ({len(day_sizes)} days total): "
+            f"{len(train_ids)} train "
+            f"({len(train_ids) / n:.1%}, {n_train_days} days)  |  "
+            f"{len(val_ids)} val "
+            f"({len(val_ids) / n:.1%}, {n_val_days} days)  |  "
+            f"{len(test_ids)} test "
+            f"({len(test_ids) / n:.1%}, {n_test_days} days)  |  "
+            f"total {n} snapshots"
+        )
+
     return train_ids, val_ids, test_ids
+
+
+def day_grouped_split(cache_dir, train_frac=0.8, test_frac=0.1, val_frac=0.1,
+                      seed=42):
+    """Split cached snapshots into train/val/test by calendar day.
+
+    Thin wrapper around split_snapshot_ids that reads the ID/time arrays
+    from the .npy cache written by convert_db.py.
+    """
+    ids_path = os.path.join(cache_dir, 'snapshot_ids.npy')
+    times_path = os.path.join(cache_dir, 'snapshot_times.npy')
+    if not os.path.exists(ids_path):
+        raise RuntimeError(
+            f"No npy cache at '{cache_dir}'. "
+            "Run convert_db.py first.")
+    if not os.path.exists(times_path):
+        raise RuntimeError(
+            f"No snapshot_times.npy in '{cache_dir}'. "
+            "Re-run convert_db.py.")
+
+    ids = np.load(ids_path).tolist()
+    times = np.load(times_path).tolist()
+
+    return split_snapshot_ids(
+        ids, times, train_frac=train_frac, test_frac=test_frac,
+        val_frac=val_frac, seed=seed, verbose=True)
 
 
 # --- Dataset ---
@@ -355,41 +375,33 @@ class WindSnapshotDataset(Dataset):
 
 # --- Collate ---
 
-def _rotate_wind(y, cos_a, sin_a):
-    """Rotate wind vectors by angle `a` CCW using (sin, cos) encoding.
+def _rotate_windfield(x, y, cos_a, sin_a):
+    """Rigidly rotate positions and wind vectors together by angle `a`.
 
-    Applies the standard 2D rotation matrix to the (sin, cos) components
-    that encode meteorological wind direction (direction wind comes FROM):
-      new_sin = sin*cos(a) + cos*sin(a)   = sin(phi + a)
-      new_cos = cos*cos(a) - sin*sin(a)   = cos(phi + a)
-    This rotates the physical wind vector by `a` counter-clockwise, which
-    adds `a` to the meteorological direction. The rotation is a valid data
-    augmentation because wind direction is circular.
+    Rotates the (lat, lon) position columns counter-clockwise about the
+    origin (an offset at bearing t moves to bearing t - a) and applies
+    the same physical rotation to the wind vectors: y encodes
+    meteorological direction phi (direction wind comes FROM) as
+    (sin phi, cos phi), whose physical "toward" vector points along
+    -(sin phi, cos phi) in (east, north) coordinates; rotating that
+    vector counter-clockwise by `a` subtracts `a` from phi:
+      new_sin = sin(phi - a) = sin*cos(a) - cos*sin(a)
+      new_cos = cos(phi - a) = sin*sin(a) + cos*cos(a)
+    Pairwise distances and the angle between position offsets and wind
+    vectors are preserved. Altitude (x[..., 2]) is invariant under
+    rotation.
 
     cos_a and sin_a can be scalars or tensors broadcastable with y.
     """
+    x_rot = x.clone()
+    lat, lon = x[..., 0], x[..., 1]
+    x_rot[..., 0] = lat * cos_a + lon * sin_a
+    x_rot[..., 1] = -lat * sin_a + lon * cos_a
     y_rot = y.clone()
     s, c = y[..., 0], y[..., 1]
-    y_rot[..., 0] = s * cos_a + c * sin_a
-    y_rot[..., 1] = c * cos_a - s * sin_a
-    return y_rot
-
-
-def _reflect_windfield(x, y, reflect_x, reflect_y):
-    """Reflect positions and wind vectors across coordinate axes.
-
-    reflect_x: flip east-west axis  -> negate lon, negate sin (east-west wind)
-    reflect_y: flip N-S axis -> negate lat, negate cos (north-south wind)
-    """
-    x_ref = x.clone()
-    y_ref = y.clone()
-    if reflect_x:
-        x_ref[..., 1] = -x[..., 1]
-        y_ref[..., 0] = -y[..., 0]
-    if reflect_y:
-        x_ref[..., 0] = -x[..., 0]
-        y_ref[..., 1] = -y[..., 1]
-    return x_ref, y_ref
+    y_rot[..., 0] = s * cos_a - c * sin_a
+    y_rot[..., 1] = s * sin_a + c * cos_a
+    return x_rot, y_rot
 
 
 def pad_batch(
@@ -426,22 +438,24 @@ def pad_batch(
     return context_x, context_y, target_x, target_y, context_mask, target_mask
 
 
-def collate_fn(batch, augment=True):
+def collate_fn(batch, augment=True, use_coupled_rotation=False):
     """
-    Split each snapshot into context / target, with optional wind-direction
-    augmentation. C is a random subset, T is the full snapshot (C ⊂ T).
-    Zero-pads to batch max with bool masks.
+    Split each snapshot into context / target, with optional coupled
+    rotation augmentation. C is a random subset, T is the full snapshot
+    (C ⊂ T). Zero-pads to batch max with bool masks.
+
+    Augmentation toggle:
+      use_coupled_rotation : rigidly rotate positions and wind vectors
+                             together by a random per-snapshot angle
+                             (the only supported augmentation).
     """
     B_raw = len(batch)
-    if augment:
+    if augment and use_coupled_rotation:
         angles = torch.rand(B_raw) * (2 * math.pi)
         cos_a = angles.cos()
         sin_a = angles.sin()
-        reflect_x = torch.rand(B_raw) < 0.5
-        reflect_y = torch.rand(B_raw) < 0.5
     else:
         cos_a = sin_a = None
-        reflect_x = reflect_y = None
 
     context_xs, context_ys, target_xs, target_ys = [], [], [], []
     ctx_lens, tgt_lens = [], []
@@ -451,10 +465,8 @@ def collate_fn(batch, augment=True):
         if n < 2:
             continue
 
-        if augment:
-            if reflect_x[i] or reflect_y[i]:
-                x, y = _reflect_windfield(x, y, reflect_x[i], reflect_y[i])
-            y = _rotate_wind(y, cos_a[i], sin_a[i])
+        if cos_a is not None:
+            x, y = _rotate_windfield(x, y, cos_a[i], sin_a[i])
 
         n_ctx = int(n * float(torch.empty(1).uniform_(0.25, 0.75)))
         n_ctx = max(1, min(n_ctx, n - 1))
@@ -494,35 +506,56 @@ def make_dataloader(cache_dir, batch_size=16, shuffle=True, num_workers=4):
         persistent_workers=num_workers > 0)
 
 
-def collate_fn_val(batch, context_frac=0.5):
+def collate_fn_val(batch, context_frac=0.5, partitions=None):
     """Hold-out validation collate: target = complement of context (no leak).
 
     Unlike collate_fn (where context is a subset of target for the NP training
     objective), this splits each snapshot into disjoint context/target sets so
     validation loss measures generalisation to truly unseen points.
+
+    partitions: optional {dataset_index: (ctx_idx, held_idx)} mapping. When
+    given, batch items must be (index, x, y) and the frozen per-snapshot
+    index split is reused every epoch, so validation metrics are comparable
+    across epochs instead of being re-randomised by fresh randperm draws.
+    When None, a fresh random split is drawn per pass (used by eval scripts,
+    where the pass happens once under a fixed seed).
     """
     context_xs, context_ys, target_xs, target_ys = [], [], [], []
     ctx_lens, tgt_lens = [], []
 
-    for (x, y) in batch:
-        n = x.size(0)
-        if n < 2:
-            continue
+    if partitions is not None:
+        for (idx, x, y) in batch:
+            ctx_idx, held_idx = partitions[idx]
+            if ctx_idx.numel() == 0 or held_idx.numel() == 0:
+                continue
 
-        n_ctx = max(1, min(int(n * context_frac), n - 1))
-        perm = torch.randperm(n)
-        ctx_idx = perm[:n_ctx]
-        held_idx = perm[n_ctx:]
-        if held_idx.numel() == 0:
-            continue
+            context_xs.append(x[ctx_idx])
+            context_ys.append(y[ctx_idx])
+            target_xs.append(x[held_idx])
+            target_ys.append(y[held_idx])
 
-        context_xs.append(x[ctx_idx])
-        context_ys.append(y[ctx_idx])
-        target_xs.append(x[held_idx])
-        target_ys.append(y[held_idx])
+            ctx_lens.append(ctx_idx.numel())
+            tgt_lens.append(held_idx.numel())
+    else:
+        for (x, y) in batch:
+            n = x.size(0)
+            if n < 2:
+                continue
 
-        ctx_lens.append(n_ctx)
-        tgt_lens.append(held_idx.numel())
+            n_ctx = max(1, min(int(n * context_frac), n - 1))
+            perm = torch.randperm(n)
+            ctx_idx = perm[:n_ctx]
+            held_idx = perm[n_ctx:]
+            if held_idx.numel() == 0:
+                continue
+
+            context_xs.append(x[ctx_idx])
+            context_ys.append(y[ctx_idx])
+            target_xs.append(x[held_idx])
+            target_ys.append(y[held_idx])
+
+            ctx_lens.append(n_ctx)
+            tgt_lens.append(held_idx.numel())
 
     if not context_xs:
         raise RuntimeError(

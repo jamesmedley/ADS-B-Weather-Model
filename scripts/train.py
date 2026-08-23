@@ -75,6 +75,13 @@ if __name__ == '__main__':
         '--no_dist_bias', action='store_true',
         help='Disable distance bias in cross-attention')
     parser.add_argument(
+        '--coupled_rotation', action='store_true',
+        help='Rigidly rotate positions and wind vectors together by a '
+             'random per-snapshot angle (augmentation)')
+    parser.add_argument(
+        '--seed', type=int, default=0,
+        help='Master RNG seed for reproducible runs')
+    parser.add_argument(
         '--log_file', default=None,
         help='Path to the universal log file '
              '(default: run.log in the project root)')
@@ -102,5 +109,7 @@ if __name__ == '__main__':
         use_amp=not args.no_amp,
         weight_decay=args.weight_decay,
         use_dist_bias=not args.no_dist_bias,
+        use_coupled_rotation=args.coupled_rotation,
+        seed=args.seed,
         log_file=args.log_file,
     ))
