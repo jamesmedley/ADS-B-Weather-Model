@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: flake8 + pytest (docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build CI image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.ci
+          push: false
+          load: true
+          tags: wind-map-ci:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: flake8
+        run: >
+          docker run --rm -v "$PWD":/workspace -w /workspace
+          wind-map-ci:latest
+          bash -lc "set -o pipefail; mkdir -p ci-artifacts;
+          flake8 wind_map scripts tests
+          | tee ci-artifacts/flake8.txt"
+
+      - name: pytest
+        run: >
+          docker run --rm -v "$PWD":/workspace -w /workspace
+          wind-map-ci:latest
+          bash -lc "set -o pipefail; mkdir -p ci-artifacts; pytest
+          --junitxml=ci-artifacts/junit.xml --cov=wind_map
+          --cov-report=term-missing
+          --cov-report=xml:ci-artifacts/coverage.xml
+          --cov-report=html:ci-artifacts/htmlcov
+          --cov-fail-under=60 tests
+          | tee ci-artifacts/pytest.txt"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-artifacts-${{ github.run_id }}
+          path: ci-artifacts/
+          if-no-files-found: ignore

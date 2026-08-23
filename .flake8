@@ -1,0 +1,15 @@
+[flake8]
+max-line-length = 79
+extend-exclude =
+    .git,
+    __pycache__,
+    .pytest_cache,
+    .venv,
+    venv,
+    build,
+    dist,
+    wind_map.egg-info,
+    outputs,
+    data,
+    checkpoint,
+    docs

@@ -1,0 +1,26 @@
+# Dockerfile.ci — sanitized CI image for the ADS-B Wind Map project.
+#
+# The wind_map/ and scripts/ packages are baked in; tests/ is
+# bind-mounted at run time by .github/workflows/ci.yml so test code
+# never ships inside the image layer cache.
+
+FROM python:3.13-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /workspace
+
+# CPU-only torch wheel keeps the image ~2 GB smaller than the CUDA one.
+RUN pip install --no-cache-dir torch \
+    --index-url https://download.pytorch.org/whl/cpu
+
+COPY requirements.txt requirements-dev.txt ./
+RUN pip install --no-cache-dir -r requirements-dev.txt && \
+    pip install --no-cache-dir -r requirements.txt
+
+COPY wind_map/ ./wind_map/
+COPY scripts/ ./scripts/
+
+CMD ["bash", "-lc", "flake8 --version && pytest --version"]

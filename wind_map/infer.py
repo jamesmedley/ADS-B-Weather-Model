@@ -12,6 +12,7 @@ Example:
 import torch
 import numpy as np
 from wind_map.network import LatentModel
+from wind_map.gp import norm_params_from_dict
 from wind_map.preprocess import (
     normalise_coords, encode_wind, NormParams, LEGACY_PARAMS,
 )
@@ -191,7 +192,10 @@ class WindPredictor:
         if params is not None:
             self.params = params
         elif 'norm_params' in ckpt:
-            self.params = NormParams(**ckpt['norm_params'])
+            # Checkpoints store to_dict() output, whose speed keys
+            # ('wind_speed_kt_mean') differ from NormParams field
+            # names; norm_params_from_dict accepts both conventions.
+            self.params = norm_params_from_dict(ckpt['norm_params'])
         else:
             self.params = LEGACY_PARAMS
             print("Warning: checkpoint has no norm_params; "

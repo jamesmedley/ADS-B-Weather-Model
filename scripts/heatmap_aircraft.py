@@ -1,5 +1,5 @@
 """
-heatmap_aircraft.py â€” Strava-style density heatmap of aircraft
+heatmap_aircraft.py - Strava-style density heatmap of aircraft
 flight tracks, built directly from the raw ADS-B SQLite database.
 
 Reconstructs per-aircraft polylines from consecutive position reports,
