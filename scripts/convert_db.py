@@ -14,8 +14,7 @@ encoding or target scaling.
 
 Cache layout (written to --out):
     x.npy            float32 [N, 3]  lat_norm, lon_norm, alt_norm
-    y.npy            float32 [N, 3]  wind_dir_sin, wind_dir_cos,
-                                      wind_speed_norm
+    y.npy            float32 [N, 2]  wind_u_norm, wind_v_norm
     snapshot_ids.npy int64   [S]     snapshot_id per snapshot
     snapshot_times.npy <U32  [S]     snapshot_time, aligned with snapshot_ids
     offsets.npy      int64   [S+1]   row range in x/y per snapshot
@@ -127,16 +126,25 @@ def convert(db_path, out_dir, min_aircraft=MIN_AIRCRAFT,
     distances_km = np.sqrt(lat_km ** 2 + lon_km ** 2)
     range_km = float(np.percentile(distances_km, 99))
     max_alt_ft = float(np.percentile(all_alts, 99))
-    log_speeds = np.log(1 + all_ws)
+
+    all_wd = train_arr[:, 3]
+    rad = np.radians(all_wd)
+    u_all = -all_ws * np.sin(rad)
+    v_all = -all_ws * np.cos(rad)
+    u_mean = float(u_all.mean())
+    u_std = float(u_all.std())
+    v_mean = float(v_all.mean())
+    v_std = float(v_all.std())
+
     params = NormParams(
         centre_lat=centre_lat,
         centre_lon=centre_lon,
         range_km=range_km,
         max_alt_ft=max_alt_ft,
-        wind_speed_mean_kt=float(all_ws.mean()),
-        wind_speed_std_kt=float(all_ws.std()),
-        log_speed_mean=float(log_speeds.mean()),
-        log_speed_std=float(log_speeds.std()),
+        u_mean=u_mean,
+        u_std=u_std,
+        v_mean=v_mean,
+        v_std=v_std,
     )
 
     # --- Normalise and write ---
@@ -148,14 +156,13 @@ def convert(db_path, out_dir, min_aircraft=MIN_AIRCRAFT,
         rows = rows_by_snapshot.get(sid, [])
         if rows:
             xs = np.empty((len(rows), 3), dtype=np.float32)
-            ys = np.empty((len(rows), 3), dtype=np.float32)
+            ys = np.empty((len(rows), 2), dtype=np.float32)
             for j, (lat, lon, alt_ft, wind_dir, wind_speed) in enumerate(rows):
                 lat_n, lon_n, alt_n = normalise_coords(
                     lat, lon, alt_ft, params)
-                sin_w, cos_w, spd_n = encode_wind(
-                    wind_dir, wind_speed, params)
+                u_n, v_n = encode_wind(wind_dir, wind_speed, params)
                 xs[j] = (lat_n, lon_n, alt_n)
-                ys[j] = (sin_w, cos_w, spd_n)
+                ys[j] = (u_n, v_n)
             x_chunks.append(xs)
             y_chunks.append(ys)
             total_rows += len(rows)
@@ -169,7 +176,7 @@ def convert(db_path, out_dir, min_aircraft=MIN_AIRCRAFT,
     y_all = (
         np.concatenate(y_chunks, axis=0)
         if y_chunks
-        else np.empty((0, 3), dtype=np.float32)
+        else np.empty((0, 2), dtype=np.float32)
     )
     snapshot_ids_arr = np.asarray(snapshot_ids, dtype=np.int64)
     snapshot_times_arr = np.asarray(
@@ -210,10 +217,8 @@ def convert(db_path, out_dir, min_aircraft=MIN_AIRCRAFT,
           f"snapshots (seed {split_seed})")
     print(f"  centre: ({centre_lat:.4f}, {centre_lon:.4f})  "
           f"range_km: {range_km:.1f}  max_alt: {max_alt_ft:.0f} ft")
-    print(f"  wind speed: mean={params.wind_speed_mean_kt:.2f} kt  "
-          f"std={params.wind_speed_std_kt:.2f} kt")
-    print(f"  log speed: mean={params.log_speed_mean:.4f}  "
-          f"std={params.log_speed_std:.4f}")
+    print(f"  u: mean={params.u_mean:.2f} kt  std={params.u_std:.2f} kt")
+    print(f"  v: mean={params.v_mean:.2f} kt  std={params.v_std:.2f} kt")
     print(f"  cache written to {out_dir}/ in {dt:.1f}s")
     print(
         f"    x.npy: {x_all.shape} {x_all.dtype}"

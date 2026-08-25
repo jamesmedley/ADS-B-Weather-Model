@@ -1,10 +1,18 @@
 """
-visualise_wind_gp.py — Same quiver + uncertainty maps as visualise_wind.py,
-but using the GP baseline instead of the ANP.
+visualise_wind_gp.py — Same quiver + speed/direction uncertainty maps
+as visualise_wind.py, but using the GP baseline instead of the ANP.
 
 Reuses make_grid / wind_to_uv / lonlat_to_mercator from wind_map.utils and the
 array-level renderers _save_basemap / _save_uncertainty from visualise_wind.py,
 so the output looks identical and is directly comparable.
+
+Saves three images from each run:
+  - wind_field_gp_uncertainty_speed.png     — inferno speed-uncertainty
+                                  heatmap behind the quiver (grey arrows)
+  - wind_field_gp_uncertainty_direction.png — inferno direction-uncertainty
+                                  heatmap behind the quiver (grey arrows)
+  - wind_field_gp_basemap.png               — geographical basemap behind the
+                                  quiver (speed-coloured arrows)
 
 Usage:
     python scripts/visualise_wind_gp.py --params checkpoint/gp_params.json \
@@ -35,7 +43,8 @@ from scripts.visualise_wind import (  # noqa: E402
 
 
 def plot_wind_gp(params_path, alt_ft, context, n_lat, n_lon,
-                 output_uncertainty, output_basemap,
+                 output_uncertainty_speed, output_uncertainty_direction,
+                 output_basemap,
                  snapshot_id=None, snapshot_time=None,
                  norm_params=None, lat_range_deg=None, lon_range_deg=None):
     predictor = GaussianProcessPredictor(params_path, params=norm_params)
@@ -114,19 +123,26 @@ def plot_wind_gp(params_path, alt_ft, context, n_lat, n_lon,
         vmax = np.percentile(arr, hi)
         return np.clip((arr - vmin) / (vmax - vmin + 1e-9), 0, 1)
 
-    heat_unc = 0.5 * (
-        _pct_normalise(heat_dir_std) + _pct_normalise(heat_spd_std))
+    heat_dir_unc = _pct_normalise(heat_dir_std)
+    heat_spd_unc = _pct_normalise(heat_spd_std)
 
     heat_mx, heat_my = lonlat_to_mercator(heat_lon, heat_lat)
 
-    # Uncertainty image
+    # Uncertainty images
     _save_uncertainty(
-        output_uncertainty, mx, my, u_scaled, v_scaled,
-        heat_unc, heat_mx, heat_my,
+        output_uncertainty_speed, mx, my, u_scaled, v_scaled,
+        heat_spd_unc, heat_mx, heat_my,
         obs_mx, obs_my, ou_s, ov_s, obs_spd, obs_alt,
         x_min, x_max, y_min, y_max,
         alt_ft, snapshot_time, snapshot_id,
-    )
+        component="Speed")
+    _save_uncertainty(
+        output_uncertainty_direction, mx, my, u_scaled, v_scaled,
+        heat_dir_unc, heat_mx, heat_my,
+        obs_mx, obs_my, ou_s, ov_s, obs_spd, obs_alt,
+        x_min, x_max, y_min, y_max,
+        alt_ft, snapshot_time, snapshot_id,
+        component="Direction")
 
 
 if __name__ == "__main__":
@@ -136,8 +152,8 @@ if __name__ == "__main__":
                    help="Path to gp_params.json from train_gp.py")
     p.add_argument("--alt_ft", type=float, default=35000)
     p.add_argument("--output", default="outputs/imgs/wind_field_gp.png",
-                   help="Base output path; saves _uncertainty "
-                        "and _basemap variants")
+                   help="Base output path; saves _uncertainty_speed,"
+                        " _uncertainty_direction and _basemap variants")
     p.add_argument("--samples", type=int, default=1000,
                    help="Accepted for parity with visualise_wind.py (ignored)")
     p.add_argument("--grid_lat", type=int, default=25)
@@ -182,7 +198,8 @@ if __name__ == "__main__":
         lon_range_deg = norm_params.range_km / norm_params.km_per_deg_lon
 
     root, ext = os.path.splitext(args.output)
-    uncertainty_path = f"{root}_uncertainty{ext}"
+    uncertainty_speed_path = f"{root}_uncertainty_speed{ext}"
+    uncertainty_direction_path = f"{root}_uncertainty_direction{ext}"
     basemap_path = f"{root}_basemap{ext}"
 
     plot_wind_gp(
@@ -191,7 +208,8 @@ if __name__ == "__main__":
         context=context,
         n_lat=args.grid_lat,
         n_lon=args.grid_lon,
-        output_uncertainty=uncertainty_path,
+        output_uncertainty_speed=uncertainty_speed_path,
+        output_uncertainty_direction=uncertainty_direction_path,
         output_basemap=basemap_path,
         snapshot_id=sid,
         snapshot_time=snapshot_time,

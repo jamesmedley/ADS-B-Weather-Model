@@ -19,17 +19,17 @@ SEED = 7
 def rand_inputs(b=2, n_ctx=5, n_tgt=6, seed=SEED):
     g = torch.Generator().manual_seed(seed)
     cx = torch.randn(b, n_ctx, 3, generator=g)
-    cy = torch.randn(b, n_ctx, 3, generator=g)
+    cy = torch.randn(b, n_ctx, 2, generator=g)
     tx = torch.randn(b, n_tgt, 3, generator=g)
-    ty = torch.randn(b, n_tgt, 3, generator=g)
+    ty = torch.randn(b, n_tgt, 2, generator=g)
     return cx, cy, tx, ty
 
 
 def test_inference_forward_shapes_no_loss(tiny_model):
     cx, cy, tx, _ = rand_inputs()
     mu, sigma, kl, kl_dim, loss = tiny_model(cx, cy, tx)
-    assert mu.shape == (2, 6, 3)
-    assert sigma.shape == (2, 6, 3)
+    assert mu.shape == (2, 6, 2)
+    assert sigma.shape == (2, 6, 2)
     assert kl is None and kl_dim is None and loss is None
     assert (sigma >= 0.1).all()
     assert torch.isfinite(mu).all()
@@ -65,9 +65,9 @@ def test_padded_targets_do_not_affect_valid_outputs(tiny_model):
     g = torch.Generator().manual_seed(SEED + 1)
     b, nt_true, nt_pad = 2, 4, 3
     cx = torch.randn(b, 5, 3, generator=g)
-    cy = torch.randn(b, 5, 3, generator=g)
+    cy = torch.randn(b, 5, 2, generator=g)
     tx = torch.randn(b, nt_true + nt_pad, 3, generator=g)
-    ty = torch.randn(b, nt_true + nt_pad, 3, generator=g)
+    ty = torch.randn(b, nt_true + nt_pad, 2, generator=g)
 
     mask = torch.zeros(b, nt_true + nt_pad, dtype=torch.bool)
     mask[:, :nt_true] = True
@@ -93,7 +93,7 @@ def test_padded_targets_do_not_affect_valid_outputs(tiny_model):
 def test_padded_context_does_not_change_predictions(tiny_model):
     g = torch.Generator().manual_seed(SEED + 2)
     cx = torch.randn(1, 4 + 3, 3, generator=g)
-    cy = torch.randn(1, 4 + 3, 3, generator=g)
+    cy = torch.randn(1, 4 + 3, 2, generator=g)
     tx = torch.randn(1, 6, 3, generator=g)
     cmask = torch.tensor([[True] * 4 + [False] * 3])
     torch.manual_seed(5)

@@ -6,3 +6,4 @@ pillow
 scipy
 contextily
 scikit-optimize
+umap-learn

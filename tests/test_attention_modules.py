@@ -69,7 +69,7 @@ def test_attention_dist_bias_changes_result():
 def test_latent_encoder_returns_positive_scale():
     g = torch.Generator().manual_seed(1)
     x = torch.randn(2, 5, 3, generator=g)
-    y = torch.randn(2, 5, 3, generator=g)
+    y = torch.randn(2, 5, 2, generator=g)
     enc = LatentEncoder(num_hidden=8, num_latents=4,
                         num_heads=4, layers=1, dropout=0.0)
     enc.eval()
@@ -82,7 +82,7 @@ def test_latent_encoder_returns_positive_scale():
 def test_latent_encoder_mask_ignores_padded_rows():
     g = torch.Generator().manual_seed(2)
     x = torch.randn(1, 5, 3, generator=g)
-    y = torch.randn(1, 5, 3, generator=g)
+    y = torch.randn(1, 5, 2, generator=g)
     enc = LatentEncoder(num_hidden=8, num_latents=4,
                         num_heads=4, layers=1, dropout=0.0)
     enc.eval()
@@ -102,7 +102,7 @@ def test_latent_encoder_mask_ignores_padded_rows():
 def test_deterministic_encoder_shape_and_context_masking():
     g = torch.Generator().manual_seed(3)
     cx = torch.randn(2, 5, 3, generator=g)
-    cy = torch.randn(2, 5, 3, generator=g)
+    cy = torch.randn(2, 5, 2, generator=g)
     tx = torch.randn(2, 7, 3, generator=g)
     enc = DeterministicEncoder(num_hidden=8, num_heads=4,
                                layers=1, dropout=0.0)

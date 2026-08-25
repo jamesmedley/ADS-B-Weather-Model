@@ -22,7 +22,7 @@ def test_getitem_shapes_and_dtypes(cache_dir):
     x, y = ds[0]
     assert x.dtype == torch.float32
     assert y.dtype == torch.float32
-    assert x.shape[1] == 3 and y.shape[1] == 3
+    assert x.shape[1] == 3 and y.shape[1] == 2
     assert x.shape[0] == y.shape[0]
     assert torch.isfinite(x).all()
     assert torch.isfinite(y).all()
@@ -69,8 +69,8 @@ def test_make_dataloader_yields_padded_batches(cache_dir):
     (cx, cy, tx, ty, cmask, tmask) = batches[0]
     B = cx.shape[0]
     assert cx.shape == (B, cx.shape[1], 3)
-    assert cy.shape == cx.shape
-    assert tx.shape[2] == 3 and ty.shape[2] == 3
+    assert cy.shape == (B, cx.shape[1], 2)
+    assert tx.shape[2] == 3 and ty.shape[2] == 2
     assert cmask.dtype == torch.bool and tmask.dtype == torch.bool
     assert cmask.sum() > 0 and tmask.sum() > 0
 

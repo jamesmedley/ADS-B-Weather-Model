@@ -22,7 +22,7 @@ pytestmark = pytest.mark.unit
 def fake_item(n, seed):
     g = torch.Generator().manual_seed(seed)
     x = torch.randn(n, 3, generator=g)
-    y = torch.randn(n, 3, generator=g)
+    y = torch.randn(n, 2, generator=g)
     return x, y
 
 
@@ -62,7 +62,7 @@ def test_collate_context_is_subset_of_target(train_batch):
 
 def test_collate_skips_snapshots_with_single_observation():
     good = fake_item(6, seed=0)
-    tiny = (torch.zeros(1, 3), torch.zeros(1, 3))
+    tiny = (torch.zeros(1, 3), torch.zeros(1, 2))
     torch.manual_seed(0)
     (cx, _, tx, _, cmask, tmask) = collate_fn([good, tiny])
     assert cx.shape[0] == 1
@@ -71,8 +71,8 @@ def test_collate_skips_snapshots_with_single_observation():
 
 
 def test_collate_all_invalid_batch_raises():
-    a = (torch.zeros(1, 3), torch.zeros(1, 3))
-    b = (torch.zeros(1, 3), torch.zeros(1, 3))
+    a = (torch.zeros(1, 3), torch.zeros(1, 2))
+    b = (torch.zeros(1, 3), torch.zeros(1, 2))
     with pytest.raises(RuntimeError):
         collate_fn([a, b])
 
@@ -81,7 +81,7 @@ def test_rotation_preserves_pairwise_distances():
     torch.manual_seed(0)
     angle = torch.tensor(1.234)
     x, y = fake_item(7, seed=1)
-    xr, yr = _rotate_windfield(x, y, angle.cos(), angle.sin())
+    xr, yr = _rotate_windfield(x.clone(), y.clone(), angle.cos(), angle.sin())
 
     def pdist(m):
         d = torch.cdist(m[:, :2], m[:, :2])
@@ -95,23 +95,24 @@ def test_rotation_preserves_wind_vector_gram_matrix():
     torch.manual_seed(0)
     angle = torch.tensor(-0.57)
     _, y = fake_item(6, seed=2)
-    _, yr = _rotate_windfield(y.clone(), y, angle.cos(), angle.sin())
-    gram_before = y[..., :2] @ y[..., :2].T
-    gram_after = yr[..., :2] @ yr[..., :2].T
+    gram_before = y.clone() @ y.clone().T
+    norms_before = (y.clone() ** 2).sum(-1)
+    _, yr = _rotate_windfield(y.clone(), y.clone(), angle.cos(), angle.sin())
+    gram_after = yr @ yr.T
     assert torch.allclose(gram_before, gram_after, atol=1e-5)
-    norms_before = (y[..., :2] ** 2).sum(-1)
-    norms_after = (yr[..., :2] ** 2).sum(-1)
+    norms_after = (yr ** 2).sum(-1)
     assert torch.allclose(norms_before, norms_after, atol=1e-5)
 
 
-def test_collate_rotation_option_changes_targets_consistently(cache_dir):
+def test_collate_rotation_option_changes_targets_consistently(
+        cache_dir, params):
     from wind_map.preprocess import WindSnapshotDataset
     ds = WindSnapshotDataset(cache_dir)
     items = [ds[i] for i in range(3)]
     torch.manual_seed(0)
     plain = collate_fn(items, use_coupled_rotation=False)
     torch.manual_seed(0)
-    rot = collate_fn(items, use_coupled_rotation=True)
+    rot = collate_fn(items, use_coupled_rotation=True, params=params)
     # Same snapshots present as targets; distances preserved although
     # coordinates differ (rotation applied).
     (_, _, t0, _, _, m0) = plain

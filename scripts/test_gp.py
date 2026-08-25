@@ -80,14 +80,16 @@ def evaluate(params_path, cache_dir, split="test", context_frac=0.5,
             nll_sum += -log_p.sum()
             nll_count += nt
 
-            pred_dir = np.degrees(np.arctan2(mean[:, 0], mean[:, 1])) % 360
-            true_dir = np.degrees(np.arctan2(y_t[:, 0], y_t[:, 1])) % 360
-            pred_log_spd = (mean[:, 2] * params.log_speed_std
-                            + params.log_speed_mean)
-            pred_speed = np.exp(pred_log_spd) - 1
-            true_log_spd = (y_t[:, 2] * params.log_speed_std
-                            + params.log_speed_mean)
-            true_speed = np.exp(true_log_spd) - 1
+            # Decode u/v to physical wind
+            u_pred = mean[:, 0] * params.u_std + params.u_mean
+            v_pred = mean[:, 1] * params.v_std + params.v_mean
+            pred_speed = np.sqrt(u_pred**2 + v_pred**2)
+            pred_dir = np.degrees(np.arctan2(-u_pred, -v_pred)) % 360
+
+            u_true = y_t[:, 0] * params.u_std + params.u_mean
+            v_true = y_t[:, 1] * params.v_std + params.v_mean
+            true_speed = np.sqrt(u_true**2 + v_true**2)
+            true_dir = np.degrees(np.arctan2(-u_true, -v_true)) % 360
 
             speed_err = pred_speed - true_speed
             dir_diff = np.abs(pred_dir - true_dir) % 360
@@ -97,13 +99,17 @@ def evaluate(params_path, cache_dir, split="test", context_frac=0.5,
             sq_speed_err_sum += (speed_err ** 2).sum()
             dir_err_sum += dir_err.sum()
 
-            # Physical-space uncertainty (same delta method as scripts/test.py)
-            R2 = mean[:, 0] ** 2 + mean[:, 1] ** 2 + 1e-9
-            var_dir = (((mean[:, 1] / R2) ** 2) * var_total[:, 0]
-                       + ((mean[:, 0] / R2) ** 2) * var_total[:, 1])
+            # Physical-space uncertainty via delta method
+            speed_safe = np.maximum(pred_speed, 1e-6)
+            su = np.sqrt(var_total[:, 0]) * params.u_std
+            sv = np.sqrt(var_total[:, 1]) * params.v_std
+
+            var_dir = ((v_pred / speed_safe**2)**2 * su**2
+                       + (u_pred / speed_safe**2)**2 * sv**2)
             std_dir = np.degrees(np.sqrt(var_dir))
-            std_speed = (np.sqrt(var_total[:, 2]) * params.log_speed_std
-                         * np.exp(pred_log_spd))
+            var_speed = ((u_pred / speed_safe)**2 * su**2
+                         + (v_pred / speed_safe)**2 * sv**2)
+            std_speed = np.sqrt(var_speed)
 
             cov68_dir += (dir_err <= std_dir).sum()
             cov95_dir += (dir_err <= 2 * std_dir).sum()

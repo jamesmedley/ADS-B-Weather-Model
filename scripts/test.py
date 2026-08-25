@@ -119,23 +119,16 @@ def evaluate(checkpoint_path, cache_dir, split='test', num_hidden=None,
         target_y_np = target_y.numpy()
         mask_np = mask.cpu().numpy().astype(bool)
 
-        pred_dir = np.degrees(
-            np.arctan2(
-                mean_mu_np[..., 0], mean_mu_np[..., 1]
-            )
-        ) % 360
-        pred_log_speed = (mean_mu_np[..., 2] * params.log_speed_std
-                          + params.log_speed_mean)
-        pred_speed = np.exp(pred_log_speed) - 1
-        true_dir = np.degrees(
-            np.arctan2(
-                target_y_np[..., 0],
-                target_y_np[..., 1]
-            )
-        ) % 360
-        true_log_speed = (target_y_np[..., 2] * params.log_speed_std
-                          + params.log_speed_mean)
-        true_speed = np.exp(true_log_speed) - 1
+        # Decode predicted u/v to physical wind
+        u_pred = mean_mu_np[..., 0] * params.u_std + params.u_mean
+        v_pred = mean_mu_np[..., 1] * params.v_std + params.v_mean
+        pred_speed = np.sqrt(u_pred**2 + v_pred**2)
+        pred_dir = np.degrees(np.arctan2(-u_pred, -v_pred)) % 360
+
+        u_true = target_y_np[..., 0] * params.u_std + params.u_mean
+        v_true = target_y_np[..., 1] * params.v_std + params.v_mean
+        true_speed = np.sqrt(u_true**2 + v_true**2)
+        true_dir = np.degrees(np.arctan2(-u_true, -v_true)) % 360
 
         speed_err = pred_speed - true_speed
         dir_err = _circular_abs_diff_deg(pred_dir, true_dir)
@@ -146,17 +139,17 @@ def evaluate(checkpoint_path, cache_dir, split='test', num_hidden=None,
 
         # Physical-space coverage: direction (circular) and speed (linear)
         # using delta-method uncertainty conversion.
-        sin_mu = mean_mu_np[..., 0]
-        cos_mu = mean_mu_np[..., 1]
-        R2 = sin_mu**2 + cos_mu**2 + 1e-9
-        var_dir_rad = (((cos_mu / R2) * total_std_np[..., 0])**2
-                       + ((sin_mu / R2) * total_std_np[..., 1])**2)
-        std_dir_deg = np.degrees(np.sqrt(var_dir_rad))
+        sigma_u = total_std_np[..., 0] * params.u_std
+        sigma_v = total_std_np[..., 1] * params.v_std
+        speed_safe = np.maximum(pred_speed, 1e-6)
 
-        log_speed_pred = (mean_mu_np[..., 2] * params.log_speed_std
-                          + params.log_speed_mean)
-        std_speed_kt = (total_std_np[..., 2] * params.log_speed_std
-                        * np.exp(log_speed_pred))
+        var_speed = ((u_pred / speed_safe)**2 * sigma_u**2
+                     + (v_pred / speed_safe)**2 * sigma_v**2)
+        std_speed_kt = np.sqrt(var_speed)
+
+        var_dir_rad = ((v_pred / speed_safe**2)**2 * sigma_u**2
+                       + (u_pred / speed_safe**2)**2 * sigma_v**2)
+        std_dir_deg = np.degrees(np.sqrt(var_dir_rad))
 
         m = mask_np
         dir_within_1s = dir_err[m] <= std_dir_deg[m]

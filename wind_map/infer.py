@@ -16,7 +16,7 @@ from wind_map.gp import norm_params_from_dict
 from wind_map.preprocess import (
     normalise_coords, encode_wind, NormParams, LEGACY_PARAMS,
 )
-from wind_map.utils import circular_mean, circular_std
+from wind_map.utils import circular_std
 
 
 # ---------------------------------------------------------------------------
@@ -72,11 +72,11 @@ def observations_to_tensors(observations, device, params: NormParams):
         lat_n, lon_n, alt_n = normalise_coords(
             obs['lat'], obs['lon'], obs['alt_ft'], params
         )
-        sin_w, cos_w, spd_n = encode_wind(
+        u_n, v_n = encode_wind(
             obs['wind_dir'], obs['wind_speed'], params
         )
         xs.append([lat_n, lon_n, alt_n])
-        ys.append([sin_w, cos_w, spd_n])
+        ys.append([u_n, v_n])
     x = torch.FloatTensor(xs).unsqueeze(0).to(device)
     y = torch.FloatTensor(ys).unsqueeze(0).to(device)
     return x, y
@@ -93,26 +93,25 @@ def queries_to_tensor(queries, device, params: NormParams):
     return torch.FloatTensor(xs).unsqueeze(0).to(device)
 
 
-def _log_speed_to_kt(spd_norm, params: NormParams):
-    """Convert normalised log-speed back to knots."""
-    neg = spd_norm < -params.log_speed_mean / params.log_speed_std
-    if np.any(neg):
-        n_neg = int(neg.sum())
-        print(f"  Warning: {n_neg} speed logits produce negative speeds "
-              f"(spd_norm < "
-              f"{(-params.log_speed_mean / params.log_speed_std):.2f})")
-    log_speed = spd_norm * params.log_speed_std + params.log_speed_mean
-    return np.exp(log_speed) - 1
+def _uv_to_physical(u_norm, v_norm, params: NormParams):
+    """Decode normalised (u, v) to physical wind (direction, speed).
+
+    Both inputs are numpy arrays. Returns (direction_deg, speed_kt).
+    """
+    u = u_norm * params.u_std + params.u_mean
+    v = v_norm * params.v_std + params.v_mean
+    speed = np.sqrt(u**2 + v**2)
+    direction = np.degrees(np.arctan2(-u, -v)) % 360
+    return direction, speed
 
 
 def compute_uncertainty_components(mu_stack, sigma_stack, params: NormParams,
                                    mc_samples=10, seed=0):
-    """Given mu_stack [n_z, N, 3] and sigma_stack [n_z, N, 3]
+    """Given mu_stack [n_z, N, 2] and sigma_stack [n_z, N, 2]
     from multiple latent draws, return epistemic and aleatoric uncertainty.
 
     Aleatoric direction std is computed via MC integration of the
-    predictive distribution (avoids the delta-method approximation).
-    Aleatoric speed std uses the exact Jacobian of the log transform.
+    predictive distribution. Aleatoric speed std uses the exact Jacobian.
     Epistemic std is the standard deviation of z-draw means.
 
     Returns dict with keys:
@@ -120,39 +119,42 @@ def compute_uncertainty_components(mu_stack, sigma_stack, params: NormParams,
         aleatoric_dir_std, aleatoric_speed_std
     """
     n_z, n_pts = mu_stack.shape[:2]
-    sin_mu = mu_stack[..., 0]
-    cos_mu = mu_stack[..., 1]
-    spd_mu = mu_stack[..., 2]
+    u_mu = mu_stack[..., 0]
+    v_mu = mu_stack[..., 1]
+
+    # Decode each z-draw's mu to physical wind
+    sample_dirs = np.empty_like(u_mu)
+    sample_speeds = np.empty_like(u_mu)
+    for z in range(n_z):
+        d, s = _uv_to_physical(u_mu[z], v_mu[z], params)
+        sample_dirs[z] = d
+        sample_speeds[z] = s
 
     # --- Epistemic: variance of z-draw means ---
-    sample_dirs = np.degrees(np.arctan2(sin_mu, cos_mu)) % 360
-    sample_speeds = _log_speed_to_kt(spd_mu, params)
-
     epistemic_dir_std = circular_std(sample_dirs, axis=0)
     epistemic_speed_std = sample_speeds.std(axis=0, ddof=1)
 
-    sin_sig = sigma_stack[..., 0]
-    cos_sig = sigma_stack[..., 1]
-    spd_sig = sigma_stack[..., 2]
+    # --- Aleatoric speed: Jacobian-based ---
+    u = u_mu * params.u_std + params.u_mean
+    v = v_mu * params.v_std + params.v_mean
+    speed = np.maximum(np.sqrt(u**2 + v**2), 1e-6)
+    sigma_u = sigma_stack[..., 0] * params.u_std
+    sigma_v = sigma_stack[..., 1] * params.v_std
 
-    # --- Aleatoric speed: Jacobian-based (exact for the log transform) ---
-    log_speed_mean_rep = params.log_speed_mean + spd_mu * params.log_speed_std
-    jacobian = params.log_speed_std * np.exp(log_speed_mean_rep)
-    aleatoric_speed_var = (spd_sig * jacobian) ** 2
-    aleatoric_speed_std = np.sqrt(aleatoric_speed_var.mean(axis=0))
+    ale_speed_var = ((u / speed)**2 * sigma_u**2
+                     + (v / speed)**2 * sigma_v**2)
+    aleatoric_speed_std = np.sqrt(ale_speed_var.mean(axis=0))
 
     # --- Aleatoric direction: MC integration ---
-    # Draw K MC samples per z-draw from N(mu_z, sigma_z), convert to
-    # direction via atan2, compute within-z circular std, then average.
     rng = np.random.default_rng(seed)
     K = min(mc_samples, 10)
     within_z_std = np.empty((n_z, n_pts))
     for z in range(n_z):
-        eps_sin = rng.normal(0, 1, (K, n_pts)) * sin_sig[z]
-        eps_cos = rng.normal(0, 1, (K, n_pts)) * cos_sig[z]
-        sin_mc = sin_mu[z] + eps_sin
-        cos_mc = cos_mu[z] + eps_cos
-        mc_dirs = np.degrees(np.arctan2(sin_mc, cos_mc)) % 360
+        eps_u = rng.normal(0, 1, (K, n_pts)) * sigma_u[z]
+        eps_v = rng.normal(0, 1, (K, n_pts)) * sigma_v[z]
+        mc_u = u[z] + eps_u
+        mc_v = v[z] + eps_v
+        mc_dirs = np.degrees(np.arctan2(-mc_u, -mc_v)) % 360
         within_z_std[z] = circular_std(mc_dirs, axis=0)
 
     aleatoric_dir_std = within_z_std.mean(axis=0)
@@ -192,9 +194,7 @@ class WindPredictor:
         if params is not None:
             self.params = params
         elif 'norm_params' in ckpt:
-            # Checkpoints store to_dict() output, whose speed keys
-            # ('wind_speed_kt_mean') differ from NormParams field
-            # names; norm_params_from_dict accepts both conventions.
+            # Checkpoints store to_dict() output
             self.params = norm_params_from_dict(ckpt['norm_params'])
         else:
             self.params = LEGACY_PARAMS
@@ -233,19 +233,17 @@ class WindPredictor:
         sigma_stack = np.stack(sigma_samples, axis=0)
 
         # Mean predictions from mu across z-draws (no aleatoric noise)
-        sin_mu = mu_stack[..., 0]
-        cos_mu = mu_stack[..., 1]
-        spd_mu = mu_stack[..., 2]
-        mu_dirs = np.degrees(np.arctan2(sin_mu, cos_mu)) % 360
-        mu_speeds = _log_speed_to_kt(spd_mu, self.params)
-        mean_dirs = circular_mean(mu_dirs, axis=0)
-        mean_speeds = mu_speeds.mean(axis=0)
+        mean_mu = mu_stack.mean(axis=0)
+        dirs, speeds = _uv_to_physical(
+            mean_mu[..., 0], mean_mu[..., 1], self.params)
+        mean_dirs = dirs
+        mean_speeds = speeds
 
         # Epistemic & aleatoric components
         components = compute_uncertainty_components(
             mu_stack, sigma_stack, self.params)
 
-        # Total uncertainty: sqrt(Var(mu) + E[sigma^2]) — analytic, no MC noise
+        # Total uncertainty: sqrt(Var(mu) + E[sigma^2]) — analytic
         total_dir_std = np.sqrt(
             components['epistemic_dir_std']**2
             + components['aleatoric_dir_std']**2)

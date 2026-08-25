@@ -60,16 +60,13 @@ def predict_components(model, context, queries, n_samples, device,
     mu_stack = torch.stack(mu_samples, dim=0).numpy()
     sigma_stack = torch.stack(sigma_samples, dim=0).numpy()
 
-    sin_mu = mu_stack[..., 0]
-    cos_mu = mu_stack[..., 1]
-    spd_mu = mu_stack[..., 2]
+    u_mu = mu_stack[..., 0] * params.u_std + params.u_mean
+    v_mu = mu_stack[..., 1] * params.v_std + params.v_mean
+    speed = np.sqrt(u_mu**2 + v_mu**2)
+    dirs = np.degrees(np.arctan2(-u_mu, -v_mu)) % 360
 
-    sample_dirs = np.degrees(np.arctan2(sin_mu, cos_mu)) % 360
-    log_speed = spd_mu * params.log_speed_std + params.log_speed_mean
-    sample_speeds = np.exp(np.clip(log_speed, 0, None)) - 1
-
-    mean_dirs = circular_mean(sample_dirs, axis=0)
-    mean_speeds = sample_speeds.mean(axis=0)
+    mean_dirs = circular_mean(dirs, axis=0)
+    mean_speeds = speed.mean(axis=0)
 
     components = compute_uncertainty_components(
         mu_stack, sigma_stack, params)

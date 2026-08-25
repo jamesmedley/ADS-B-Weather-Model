@@ -28,7 +28,6 @@ def gp_inputs(n=8, seed=0):
     y = np.column_stack([
         np.sin(x[:, 0] / 40.0),
         np.cos(x[:, 1] / 50.0),
-        0.3 * np.sin(x[:, 2]),
     ])
     return x, y
 
@@ -36,8 +35,8 @@ def gp_inputs(n=8, seed=0):
 def make_reg(noise=1e-4):
     return GaussianProcessRegressor(
         lengthscales=[50.0, 50.0, 2.0],
-        amplitudes=[0.8, 0.8, 0.9],
-        noises=[noise, noise, noise])
+        amplitudes=[0.8, 0.9],
+        noises=[noise, noise])
 
 
 def test_matern52_correlation_properties():
@@ -61,7 +60,7 @@ def test_gpr_interpolates_training_points_with_low_noise():
     x, y = gp_inputs()
     reg = make_reg(noise=1e-6).fit(x, y)
     mean, var_total, var_latent = reg.predict(x)
-    assert mean.shape == (8, 3)
+    assert mean.shape == (8, 2)
     assert np.allclose(mean, y, atol=1e-3)
 
 
@@ -85,24 +84,38 @@ def test_ard_distance_symmetry():
     assert np.allclose(np.diag(d), 0.0)
 
 
-def test_norm_params_from_dict_both_key_conventions(params):
-    base = {
+def test_norm_params_from_dict_new_and_legacy_conventions(params):
+    new_style = {
         "centre_lat": params.centre_lat,
         "centre_lon": params.centre_lon,
         "range_km": params.range_km,
         "max_alt_ft": params.max_alt_ft,
-        "log_speed_mean": params.log_speed_mean,
-        "log_speed_std": params.log_speed_std,
+        "u_mean": params.u_mean,
+        "u_std": params.u_std,
+        "v_mean": params.v_mean,
+        "v_std": params.v_std,
     }
-    new_style = dict(base, wind_speed_kt_mean=30.0,
-                     wind_speed_kt_std=15.0)
-    old_style = dict(base, wind_speed_mean_kt=30.0,
-                     wind_speed_std_kt=15.0)
     p_new = norm_params_from_dict(new_style)
-    p_old = norm_params_from_dict(old_style)
-    assert p_new.wind_speed_mean_kt == p_old.wind_speed_mean_kt == 30.0
+    assert p_new.u_mean == params.u_mean
+    assert p_new.v_std == params.v_std
+
+    legacy_a = dict(new_style)
+    del legacy_a["u_mean"], legacy_a["u_std"]
+    del legacy_a["v_mean"], legacy_a["v_std"]
+    legacy_a["wind_speed_kt_mean"] = 30.0
+    legacy_a["wind_speed_kt_std"] = 15.0
+    legacy_b = dict(new_style)
+    del legacy_b["u_mean"], legacy_b["u_std"]
+    del legacy_b["v_mean"], legacy_b["v_std"]
+    legacy_b["wind_speed_mean_kt"] = 30.0
+    legacy_b["wind_speed_std_kt"] = 15.0
+    p_la = norm_params_from_dict(legacy_a)
+    p_lb = norm_params_from_dict(legacy_b)
+    assert p_la.u_mean == p_lb.u_mean
+    assert p_la.u_std == p_lb.u_std
+
     with pytest.raises(KeyError):
-        norm_params_from_dict(base)
+        norm_params_from_dict({"centre_lat": 1.0})
 
 
 def test_cache_x_to_gp_x_inverts_normalisation(cache):
@@ -131,7 +144,8 @@ def test_fit_hyperparameters_short_run_returns_sane_values():
                           y.astype(np.float64)))
     ls, amps, noises, mll = fit_hyperparameters(
         snapshots, n_steps=5, lr=0.02, verbose=False)
-    assert ls.shape == amps.shape == noises.shape == (3,)
+    assert ls.shape == (3,)
+    assert amps.shape == noises.shape == (2,)
     assert (ls > 0).all() and (amps > 0).all()
     assert (noises >= 0.01).all()
     assert np.isfinite(mll)
@@ -141,8 +155,8 @@ def test_fit_hyperparameters_short_run_returns_sane_values():
 def test_gp_predictor_api_parity_and_determinism(tmp_path, cache):
     hp = {
         "lengthscales": [50.0, 50.0, 2.0],
-        "amplitudes": [0.6, 0.6, 0.9],
-        "noises": [0.05, 0.05, 0.05],
+        "amplitudes": [0.6, 0.9],
+        "noises": [0.05, 0.05],
         "norm_params": cache.params.to_dict(),
     }
     path = tmp_path / "gp_params.json"
@@ -177,6 +191,6 @@ def test_gp_predictor_api_parity_and_determinism(tmp_path, cache):
 
 
 def test_encode_wind_matches_gp_target_encoding(params):
-    s, c, sp = encode_wind(90.0, 20.0, params)
-    assert s == pytest.approx(1.0, abs=1e-9)
-    assert c == pytest.approx(0.0, abs=1e-9)
+    u, v = encode_wind(90.0, 20.0, params)
+    assert u == pytest.approx(-1.0, abs=1e-6)
+    assert v == pytest.approx(0.0, abs=1e-6)

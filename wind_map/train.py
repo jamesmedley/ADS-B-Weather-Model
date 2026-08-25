@@ -197,13 +197,17 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
     test_ds = WindSnapshotDataset(
         cache_dir, snapshot_ids=test_ids)
 
+    # --- Normalisation params (saved in checkpoint for inference) ---
+    norm_params = load_params(cache_dir)
+
     use_persistent_workers = num_workers > 0
 
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
         collate_fn=partial(
             collate_fn,
-            use_coupled_rotation=use_coupled_rotation),
+            use_coupled_rotation=use_coupled_rotation,
+            params=norm_params),
         num_workers=num_workers,
         persistent_workers=use_persistent_workers,
         worker_init_fn=_worker_init,
@@ -230,7 +234,7 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
 
     # --- Model ---
     model = LatentModel(
-        num_hidden, num_latents=num_latents, x_dim=3, y_dim=3,
+        num_hidden, num_latents=num_latents, x_dim=3, y_dim=2,
         latent_layers=latent_layers,
         deterministic_layers=deterministic_layers,
         dropout=dropout,
@@ -481,23 +485,21 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
                 target_y_np = target_y.cpu().numpy()
                 mask_np = target_mask.cpu().numpy().astype(bool)
 
-                sin_pred, cos_pred, spd_norm_pred = (
-                    mu_np[..., 0], mu_np[..., 1], mu_np[..., 2])
-                sin_true, cos_true, spd_norm_true = (
-                    target_y_np[..., 0], target_y_np[..., 1],
-                    target_y_np[..., 2])
+                u_pred = (mu_np[..., 0] * norm_params.u_std
+                          + norm_params.u_mean)
+                v_pred = (mu_np[..., 1] * norm_params.v_std
+                          + norm_params.v_mean)
+                u_true = (target_y_np[..., 0] * norm_params.u_std
+                          + norm_params.u_mean)
+                v_true = (target_y_np[..., 1] * norm_params.v_std
+                          + norm_params.v_mean)
 
+                pred_speed = np.sqrt(u_pred**2 + v_pred**2)
+                true_speed = np.sqrt(u_true**2 + v_true**2)
                 pred_dir = np.degrees(
-                    np.arctan2(sin_pred, cos_pred)) % 360
+                    np.arctan2(-u_pred, -v_pred)) % 360
                 true_dir = np.degrees(
-                    np.arctan2(sin_true, cos_true)) % 360
-
-                pred_log_spd = (spd_norm_pred * norm_params.log_speed_std
-                                + norm_params.log_speed_mean)
-                pred_speed = np.exp(pred_log_spd) - 1
-                true_log_spd = (spd_norm_true * norm_params.log_speed_std
-                                + norm_params.log_speed_mean)
-                true_speed = np.exp(true_log_spd) - 1
+                    np.arctan2(-u_true, -v_true)) % 360
 
                 speed_err = pred_speed - true_speed
                 dir_diff = np.abs(pred_dir - true_dir) % 360
@@ -508,17 +510,18 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
                 speed_sq_err_sum += (speed_err[m] ** 2).sum()
                 dir_abs_err_sum += dir_err[m].sum()
 
-                # Coverage: 1σ / 2σ intervals via delta-method approximation
-                R2 = np.maximum(
-                    sin_pred ** 2 + cos_pred ** 2, 1e-6)
-                var_dir_rad = (
-                    ((cos_pred / R2) * sigma_np[..., 0]) ** 2
-                    + ((sin_pred / R2) * sigma_np[..., 1]) ** 2)
-                std_dir_deg = np.degrees(np.sqrt(var_dir_rad))
+                # Coverage: 1s / 2s intervals via delta-method approximation
+                sigma_u = sigma_np[..., 0] * norm_params.u_std
+                sigma_v = sigma_np[..., 1] * norm_params.v_std
+                speed_pred_safe = np.maximum(pred_speed, 1e-6)
 
-                std_speed_kt = (
-                    sigma_np[..., 2] * norm_params.log_speed_std
-                    * np.exp(pred_log_spd))
+                var_speed = ((u_pred / speed_pred_safe)**2 * sigma_u**2
+                             + (v_pred / speed_pred_safe)**2 * sigma_v**2)
+                std_speed_kt = np.sqrt(var_speed)
+
+                var_dir_rad = ((v_pred / speed_pred_safe**2)**2 * sigma_u**2
+                               + (u_pred / speed_pred_safe**2)**2 * sigma_v**2)
+                std_dir_deg = np.degrees(np.sqrt(var_dir_rad))
 
                 cov_68_sum += (np.abs(speed_err[m]) <= std_speed_kt[m]).sum()
                 cov_68_sum += (dir_err[m] <= std_dir_deg[m]).sum()

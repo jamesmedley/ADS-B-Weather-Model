@@ -11,7 +11,6 @@ ADS-B data is ever needed.
 
 import dataclasses
 import json
-import math
 from pathlib import Path
 
 import numpy as np
@@ -30,10 +29,8 @@ PARAMS = NormParams(
     centre_lon=-1.2,
     range_km=120.0,
     max_alt_ft=40_000.0,
-    wind_speed_mean_kt=30.0,
-    wind_speed_std_kt=15.0,
-    log_speed_mean=math.log(31.0),
-    log_speed_std=0.5,
+    u_mean=0.0, u_std=20.0,
+    v_mean=0.0, v_std=20.0,
 )
 
 
@@ -110,10 +107,10 @@ def make_cache(tmp_path):
                 for r in recs:
                     lat_n, lon_n, alt_n = normalise_coords(
                         r["lat"], r["lon"], r["alt_ft"], PARAMS)
-                    s, c, sp = encode_wind(
+                    u, v = encode_wind(
                         r["wind_dir"], r["wind_speed"], PARAMS)
                     xs.append([lat_n, lon_n, alt_n])
-                    ys.append([s, c, sp])
+                    ys.append([u, v])
                 total += len(recs)
                 offsets.append(total)
                 raw[sid] = recs

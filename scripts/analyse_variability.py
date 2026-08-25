@@ -33,9 +33,10 @@ def to_physical(x, y, params: NormParams):
     """Convert normalised arrays back to physical units."""
     lat_deg = x[:, 0] * params.range_km / KM_PER_DEG_LAT + params.centre_lat
     alt_ft = np.exp(x[:, 2] * np.log(1 + params.max_alt_ft)) - 1
-    dir_deg = np.degrees(np.arctan2(y[:, 0], y[:, 1])) % 360
-    log_speed = y[:, 2] * params.log_speed_std + params.log_speed_mean
-    speed_kt = np.exp(log_speed) - 1
+    u = y[:, 0] * params.u_std + params.u_mean
+    v = y[:, 1] * params.v_std + params.v_mean
+    speed_kt = np.sqrt(u**2 + v**2)
+    dir_deg = np.degrees(np.arctan2(-u, -v)) % 360
     return lat_deg, alt_ft, dir_deg, speed_kt
 
 
@@ -47,7 +48,8 @@ def leave_one_out_residuals(x, y, offsets, params: NormParams):
     """
     lat_list, alt_list, dir_resid_list, speed_resid_list = [], [], [], []
 
-    sin_all, cos_all, spd_all = y[:, 0], y[:, 1], y[:, 2]
+    u_all = y[:, 0] * params.u_std + params.u_mean
+    v_all = y[:, 1] * params.v_std + params.v_mean
 
     for s in range(len(offsets) - 1):
         start, end = offsets[s], offsets[s + 1]
@@ -55,24 +57,22 @@ def leave_one_out_residuals(x, y, offsets, params: NormParams):
         if n < 3:
             continue
 
-        sin_s = sin_all[start:end]
-        cos_s = cos_all[start:end]
-        spd_log = (spd_all[start:end] * params.log_speed_std
-                   + params.log_speed_mean)
-        spd_s = np.exp(spd_log) - 1
+        u_s = u_all[start:end]
+        v_s = v_all[start:end]
+        spd_s = np.sqrt(u_s**2 + v_s**2)
         lat_s = (x[start:end, 0] * params.range_km / KM_PER_DEG_LAT
                  + params.centre_lat)
         alt_s = np.exp(x[start:end, 2] * np.log(1 + params.max_alt_ft)) - 1
 
-        total_sin, total_cos, total_spd = sin_s.sum(), cos_s.sum(), spd_s.sum()
+        total_u, total_v, total_spd = u_s.sum(), v_s.sum(), spd_s.sum()
 
         for i in range(n):
-            loo_sin = (total_sin - sin_s[i]) / (n - 1)
-            loo_cos = (total_cos - cos_s[i]) / (n - 1)
+            loo_u = (total_u - u_s[i]) / (n - 1)
+            loo_v = (total_v - v_s[i]) / (n - 1)
             loo_spd = (total_spd - spd_s[i]) / (n - 1)
 
-            obs_dir = np.degrees(np.arctan2(sin_s[i], cos_s[i]))
-            loo_dir = np.degrees(np.arctan2(loo_sin, loo_cos))
+            obs_dir = np.degrees(np.arctan2(-u_s[i], -v_s[i]))
+            loo_dir = np.degrees(np.arctan2(-loo_u, -loo_v))
             diff = ((obs_dir - loo_dir + 180) % 360) - 180
 
             lat_list.append(lat_s[i])

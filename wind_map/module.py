@@ -89,7 +89,7 @@ class DeterministicEncoder(nn.Module):
     Queries come from target_x encoded through same projection (zeros for y).
     """
 
-    def __init__(self, num_hidden, x_dim=3, y_dim=3,
+    def __init__(self, num_hidden, x_dim=3, y_dim=2,
                  num_heads=4, layers=4, dropout=0.0,
                  use_dist_bias=False):
         super().__init__()
@@ -135,7 +135,7 @@ class LatentEncoder(nn.Module):
     """concat(x,y) -> projection -> self-attention
     -> mean -> mu/log_sigma -> z"""
 
-    def __init__(self, num_hidden, num_latents, x_dim=3, y_dim=3,
+    def __init__(self, num_hidden, num_latents, x_dim=3, y_dim=2,
                  num_heads=4, layers=4, dropout=0.0):
         super().__init__()
         self.input_projection = nn.Linear(x_dim + y_dim, num_hidden)

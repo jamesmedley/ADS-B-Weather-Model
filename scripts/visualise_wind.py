@@ -2,10 +2,12 @@
 visualise_wind.py — Plot predicted wind field as a quiver
 with uncertainty heatmap and basemap variants.
 
-Saves two images from each run:
-  - wind_field_uncertainty.png  — inferno uncertainty heatmap
-                                  behind the quiver (grey arrows)
-  - wind_field_basemap.png      — geographical basemap behind the
+Saves three images from each run:
+  - wind_field_uncertainty_speed.png     — inferno speed-uncertainty
+                                  heatmap behind the quiver (grey arrows)
+  - wind_field_uncertainty_direction.png — inferno direction-uncertainty
+                                  heatmap behind the quiver (grey arrows)
+  - wind_field_basemap.png               — geographical basemap behind the
                                   quiver (speed-coloured arrows)
 
 The basemap image is saved immediately after the wind field is
@@ -39,7 +41,8 @@ from wind_map.utils import (
 
 
 def plot_wind(checkpoint, alt_ft, context, n_samples,
-              n_lat, n_lon, output_uncertainty, output_basemap,
+              n_lat, n_lon, output_uncertainty_speed,
+              output_uncertainty_direction, output_basemap,
               num_hidden, num_latents=None,
               latent_layers=4, deterministic_layers=4,
               num_decoder_layers=None,
@@ -139,21 +142,28 @@ def plot_wind(checkpoint, alt_ft, context, n_samples,
         vmax = np.percentile(arr, hi)
         return np.clip((arr - vmin) / (vmax - vmin + 1e-9), 0, 1)
 
-    heat_unc = 0.5 * (
-        _pct_normalise(heat_dir_std) + _pct_normalise(heat_spd_std))
+    heat_dir_unc = _pct_normalise(heat_dir_std)
+    heat_spd_unc = _pct_normalise(heat_spd_std)
 
     heat_mx, heat_my = lonlat_to_mercator(heat_lon, heat_lat)
 
     # ------------------------------------------------------------------
-    # 3) Uncertainty image  — with heatmap background
+    # 3) Uncertainty images  — speed and direction heatmaps
     # ------------------------------------------------------------------
     _save_uncertainty(
-        output_uncertainty, mx, my, u_scaled, v_scaled,
-        heat_unc, heat_mx, heat_my,
+        output_uncertainty_speed, mx, my, u_scaled, v_scaled,
+        heat_spd_unc, heat_mx, heat_my,
         obs_mx, obs_my, ou_s, ov_s, obs_spd, obs_alt,
         x_min, x_max, y_min, y_max,
         alt_ft, snapshot_time, snapshot_id,
-    )
+        component="Speed")
+    _save_uncertainty(
+        output_uncertainty_direction, mx, my, u_scaled, v_scaled,
+        heat_dir_unc, heat_mx, heat_my,
+        obs_mx, obs_my, ou_s, ov_s, obs_spd, obs_alt,
+        x_min, x_max, y_min, y_max,
+        alt_ft, snapshot_time, snapshot_id,
+        component="Direction")
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +228,8 @@ def _save_uncertainty(path, mx, my, u_scaled, v_scaled,
                       heat_unc, heat_mx, heat_my,
                       obs_mx, obs_my, ou_s, ov_s, obs_spd, obs_alt,
                       x_min, x_max, y_min, y_max,
-                      alt_ft, snapshot_time, snapshot_id):
+                      alt_ft, snapshot_time, snapshot_id,
+                      component=None):
     fig, ax = plt.subplots(figsize=(11, 11))
     fig.patch.set_facecolor("#0d1b2a")
     ax.set_facecolor("#0d1b2a")
@@ -255,12 +266,16 @@ def _save_uncertainty(path, mx, my, u_scaled, v_scaled,
     sm = cm.ScalarMappable(
         cmap="inferno", norm=mcolors.Normalize(vmin=0, vmax=1))
     cb = fig.colorbar(sm, ax=ax, fraction=0.03, pad=0.02, shrink=0.6)
-    cb.set_label("Prediction Uncertainty", color="white")
+    cb.set_label(
+        f"{component} Uncertainty" if component
+        else "Prediction Uncertainty", color="white")
     cb.ax.tick_params(colors="white")
 
     ax.set_axis_off()
 
-    title = f"Predicted Wind Uncertainty — FL{int(alt_ft / 100):03d}"
+    comp = f"{component} " if component else ""
+    title = (f"Predicted Wind {comp}Uncertainty"
+             f" — FL{int(alt_ft / 100):03d}")
     if snapshot_time:
         title += f" | {format_snapshot_time(snapshot_time)}"
     elif snapshot_id:
@@ -282,8 +297,8 @@ if __name__ == "__main__":
     p.add_argument("--alt_ft", type=float, default=35000)
     p.add_argument("--output", default="outputs/imgs/wind_field.png",
                    help=(
-                       "Base output path; saves"
-                       " _uncertainty and _basemap variants"))
+                       "Base output path; saves _uncertainty_speed,"
+                       " _uncertainty_direction and _basemap variants"))
     p.add_argument("--hidden", type=int, default=128)
     p.add_argument("--num_latents", type=int, default=None,
                    help=('Number of latent dimensions '
@@ -339,7 +354,8 @@ if __name__ == "__main__":
         lon_range_deg = params.range_km / params.km_per_deg_lon
 
     root, ext = os.path.splitext(args.output)
-    uncertainty_path = f"{root}_uncertainty{ext}"
+    uncertainty_speed_path = f"{root}_uncertainty_speed{ext}"
+    uncertainty_direction_path = f"{root}_uncertainty_direction{ext}"
     basemap_path = f"{root}_basemap{ext}"
 
     plot_wind(
@@ -349,7 +365,8 @@ if __name__ == "__main__":
         n_samples=args.samples,
         n_lat=args.grid_lat,
         n_lon=args.grid_lon,
-        output_uncertainty=uncertainty_path,
+        output_uncertainty_speed=uncertainty_speed_path,
+        output_uncertainty_direction=uncertainty_direction_path,
         output_basemap=basemap_path,
         num_hidden=args.hidden,
         num_latents=args.num_latents,

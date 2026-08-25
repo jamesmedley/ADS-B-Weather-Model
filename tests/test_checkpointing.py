@@ -60,9 +60,8 @@ def test_checkpoint_roundtrip_reproduces_predictions(tmp_path):
         'norm_params': {
             'centre_lat': 51.4, 'centre_lon': -1.2,
             'range_km': 120.0, 'max_alt_ft': 40000.0,
-            'wind_speed_kt_mean': 30.0,
-            'wind_speed_kt_std': 15.0,
-            'log_speed_mean': 3.4, 'log_speed_std': 0.5,
+            'u_mean': 0.0, 'u_std': 20.0,
+            'v_mean': 0.0, 'v_std': 20.0,
         },
     })
 
@@ -73,8 +72,8 @@ def test_checkpoint_roundtrip_reproduces_predictions(tmp_path):
     g = torch.Generator().manual_seed(SEED)
     cx, cy, tx, ty = [
         torch.randn(*shape, generator=g)
-        for shape in ((2, 5, 3), (2, 5, 3), (2, 6, 3),
-                      (2, 6, 3))
+        for shape in ((2, 5, 3), (2, 5, 2), (2, 6, 3),
+                      (2, 6, 2))
     ]
     # Latent sampling is stochastic, so each forward must start
     # from the same RNG state to be comparable.

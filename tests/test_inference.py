@@ -14,7 +14,7 @@ from wind_map.infer import (
     load_model_checkpoint,
 )
 from wind_map.network import LatentModel
-from wind_map.preprocess import LEGACY_PARAMS
+from wind_map.preprocess import LEGACY_PARAMS, encode_wind
 
 pytestmark = pytest.mark.integration
 
@@ -43,10 +43,8 @@ def checkpoint(tmp_path):
         'norm_params': {
             'centre_lat': 51.4, 'centre_lon': -1.2,
             'range_km': 120.0, 'max_alt_ft': 40000.0,
-            'wind_speed_kt_mean': 30.0,
-            'wind_speed_kt_std': 15.0,
-            'log_speed_mean': math.log(31.0),
-            'log_speed_std': 0.5,
+            'u_mean': 0.0, 'u_std': 20.0,
+            'v_mean': 0.0, 'v_std': 20.0,
         },
     }, path)
     return str(path), model
@@ -139,10 +137,10 @@ def test_predictor_falls_back_to_legacy_params(tmp_path):
 
 def test_compute_uncertainty_components_values(params):
     n_z, n_pts = 3, 5
-    mu_stack = np.zeros((n_z, n_pts, 3))
-    mu_stack[:, :, 0] = 0.6   # sin component identical across draws
-    mu_stack[:, :, 1] = 0.8
-    sigma_stack = np.full((n_z, n_pts, 3), 0.2)
+    mu_stack = np.zeros((n_z, n_pts, 2))
+    mu_stack[:, :, 0] = 0.6   # u component identical across draws
+    mu_stack[:, :, 1] = 0.8   # v component identical across draws
+    sigma_stack = np.full((n_z, n_pts, 2), 0.2)
 
     out = compute_uncertainty_components(
         mu_stack, sigma_stack, params, mc_samples=5, seed=0)
@@ -154,20 +152,19 @@ def test_compute_uncertainty_components_values(params):
     # Identical z-draw means -> zero epistemic spread.
     assert np.allclose(out['epistemic_speed_std'], 0.0, atol=1e-9)
 
-    # Aleatoric speed follows the exact Jacobian of the log transform.
-    jac = params.log_speed_std * math.exp(
-        params.log_speed_mean + 0.0 * params.log_speed_std)
-    expected = math.sqrt(((sigma_stack[..., 2] * jac) ** 2).mean())
+    # Aleatoric speed follows the delta method Jacobian:
+    # speed = sqrt(u^2+v^2), ds/du = u/s, ds/dv = v/s
+    # With mu=0.6*u_std+u_mean, mu=0.8*v_std+v_mean, s~1.6*param_std
+    # For u/v with our params (u_mean=0, u_std=20, same for v):
+    u_phys = 0.6 * params.u_std + params.u_mean
+    v_phys = 0.8 * params.v_std + params.v_mean
+    s_pred = math.sqrt(u_phys**2 + v_phys**2)
+    su = 0.2 * params.u_std
+    sv = 0.2 * params.v_std
+    var_speed = (u_phys / s_pred)**2 * su**2 + (v_phys / s_pred)**2 * sv**2
+    expected = math.sqrt(var_speed)
     assert np.allclose(out['aleatoric_speed_std'], expected,
                        atol=1e-9)
-
-
-def test_log_speed_negative_logits_warn(capsys, params):
-    from wind_map.infer import _log_speed_to_kt
-    vals = _log_speed_to_kt(np.array([-50.0, 0.0]), params)
-    captured = capsys.readouterr().out
-    assert "Warning" in captured
-    assert vals[0] < 0
 
 
 def test_observations_to_tensors_shape_and_values(params):
@@ -176,11 +173,13 @@ def test_observations_to_tensors_shape_and_values(params):
             "alt_ft": 0.0, "wind_dir": 90.0, "wind_speed": 20.0}]
     x, y = observations_to_tensors(obs, torch.device('cpu'), params)
     assert x.shape == (1, 1, 3)
-    assert y.shape == (1, 1, 3)
+    assert y.shape == (1, 1, 2)
     assert x[0, 0].tolist() == [pytest.approx(0.0),
                                 pytest.approx(0.0),
                                 pytest.approx(0.0)]
-    assert y[0, 0, 0] == pytest.approx(1.0, abs=1e-6)
+    u, v = encode_wind(90.0, 20.0, params)
+    assert y[0, 0, 0] == pytest.approx(u, abs=1e-6)
+    assert y[0, 0, 1] == pytest.approx(v, abs=1e-6)
 
 
 def test_loaded_model_matches_saved_predictions(checkpoint):
@@ -189,7 +188,7 @@ def test_loaded_model_matches_saved_predictions(checkpoint):
                                       torch.device('cpu'))
     g = torch.Generator().manual_seed(SEED)
     cx = torch.randn(1, 4, 3, generator=g)
-    cy = torch.randn(1, 4, 3, generator=g)
+    cy = torch.randn(1, 4, 2, generator=g)
     tx = torch.randn(1, 3, 3, generator=g)
     torch.manual_seed(SEED)
     with torch.no_grad():

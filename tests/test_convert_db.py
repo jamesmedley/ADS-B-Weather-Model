@@ -123,7 +123,8 @@ def test_cache_files_and_dtypes(converted):
     assert ids.dtype == np.int64 and offsets.dtype == np.int64
     assert times.dtype == np.dtype("<U32")
     assert x.ndim == 2 and x.shape[1] == 3
-    assert y.shape == x.shape
+    assert y.ndim == 2 and y.shape[1] == 2
+    assert y.shape[0] == x.shape[0]
     assert len(ids) == len(times)
     assert len(offsets) == len(ids) + 1
     assert offsets[0] == 0
@@ -152,16 +153,13 @@ def test_meta_normalisation_block(converted):
         (converted / "meta.json").read_text())["normalisation"]
     assert params.centre_lat == pytest.approx(
         raw["centre_lat"])
-    # Median of the per-snapshot lat pattern
-    # [51.30, 51.40, 51.45, 51.55] -> 51.425.
     assert params.centre_lat == pytest.approx(51.425)
-    assert params.wind_speed_mean_kt == pytest.approx(17.5)
     assert params.range_km > 0
     assert params.max_alt_ft > 19000.0
-    speeds = np.array([10.0, 15.0, 20.0, 25.0])
-    expected_log_mean = float(np.log(1 + speeds).mean())
-    assert params.log_speed_mean == pytest.approx(
-        expected_log_mean, rel=1e-6)
+    assert np.isfinite(params.u_mean)
+    assert np.isfinite(params.u_std) and params.u_std > 0
+    assert np.isfinite(params.v_mean)
+    assert np.isfinite(params.v_std) and params.v_std > 0
 
 
 def test_norm_fit_scope_is_train_days_only(converted):
@@ -178,10 +176,11 @@ def test_rows_match_manual_encoding(converted):
     x, y = ds[0]
     _, _, alt_n = normalise_coords(
         CENTRE_LAT, CENTRE_LON, 5000.0, params)
-    s, c, sp = encode_wind(0.0, 10.0, params)
+    u, v = encode_wind(0.0, 10.0, params)
     assert x.shape == (4, 3)
-    assert float(y[0, 0]) == pytest.approx(s, abs=1e-5)
-    assert float(y[0, 1]) == pytest.approx(c, abs=1e-5)
+    assert y.shape[1] == 2
+    assert float(y[0, 0]) == pytest.approx(u, abs=1e-5)
+    assert float(y[0, 1]) == pytest.approx(v, abs=1e-5)
     assert float(x[0, 2]) == pytest.approx(float(alt_n),
                                            abs=1e-5)
 
@@ -220,8 +219,7 @@ def test_convert_empty_db_raises(tmp_path):
 def test_km_per_deg_lon_consistent_with_preprocess():
     from wind_map.preprocess import NormParams
     p = NormParams(centre_lat=60.0, centre_lon=0.0, range_km=1.0,
-                   max_alt_ft=1.0, wind_speed_mean_kt=1.0,
-                   wind_speed_std_kt=1.0, log_speed_mean=0.0,
-                   log_speed_std=1.0)
+                   max_alt_ft=1.0, u_mean=0.0, u_std=1.0,
+                   v_mean=0.0, v_std=1.0)
     assert p.km_per_deg_lon == pytest.approx(
         KM_PER_DEG_LAT * math.cos(math.radians(60.0)))

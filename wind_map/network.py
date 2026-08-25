@@ -2,7 +2,7 @@
 network.py — LatentModel: the full Attentive Neural Process
     for wind prediction.
 
-    model = LatentModel(num_hidden, x_dim=3, y_dim=3)
+    model = LatentModel(num_hidden, x_dim=3, y_dim=2)
     mu, sigma, kl, loss = model(context_x, context_y, target_x, target_y)
 """
 
@@ -21,13 +21,13 @@ class LatentModel(nn.Module):
 
     Inputs:
         context_x  [B, N_ctx, 3]  — lat_norm, lon_norm, alt_norm
-        context_y  [B, N_ctx, 3]  — wind_dir_sin, wind_dir_cos, wind_speed_norm
+        context_y  [B, N_ctx, 2]  — wind_u_norm, wind_v_norm
         target_x   [B, N_tgt, 3]  — query positions
-        target_y   [B, N_tgt, 3]  — ground truth (training only)
+        target_y   [B, N_tgt, 2]  — ground truth (training only)
 
     Outputs:
-        mu         [B, N_tgt, 3]  — predicted mean
-        sigma      [B, N_tgt, 3]  — predicted std (positive)
+        mu         [B, N_tgt, 2]  — predicted mean (u_norm, v_norm)
+        sigma      [B, N_tgt, 2]  — predicted std (positive)
         kl         [B, N_tgt]     — KL divergence per target point,
                                     clamped (training only)
         kl_per_dim [B, num_latents] — KL divergence per latent dim,
@@ -36,7 +36,7 @@ class LatentModel(nn.Module):
     """
 
     def __init__(self, num_hidden, num_latents=None, x_dim=3,
-                 y_dim=3, num_heads=4,
+                 y_dim=2, num_heads=4,
                  latent_layers=4, deterministic_layers=4, dropout=0.0,
                  free_bits=0.01,
                  use_dist_bias=False,

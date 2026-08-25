@@ -31,20 +31,18 @@ pytestmark = pytest.mark.unit
     ],
 )
 def test_encode_decode_roundtrip(params, wind_dir, speed):
-    sin_w, cos_w, spd_n = encode_wind(wind_dir, speed, params)
-    deg, kt = decode_wind(sin_w, cos_w, spd_n, params)
+    u, v = encode_wind(wind_dir, speed, params)
+    deg, kt = decode_wind(u, v, params)
     err = abs(deg - wind_dir) % 360
     err = min(err, 360 - err)
     assert err < 1e-6
     assert kt == pytest.approx(speed, rel=1e-9)
 
 
-def test_encode_direction_circularity(params):
-    a = encode_wind(-1.0, 20.0, params)
-    b = encode_wind(359.0, 20.0, params)
-    assert a[0] == pytest.approx(b[0], abs=1e-9)
-    assert a[1] == pytest.approx(b[1], abs=1e-9)
-    assert a[2] == pytest.approx(b[2], abs=1e-12)
+def test_encode_speed_zero(params):
+    u, v = encode_wind(45.0, 0.0, params)
+    assert u == pytest.approx(0.0, abs=1e-12)
+    assert v == pytest.approx(0.0, abs=1e-12)
 
 
 def test_normalise_coords_centre_maps_to_zero(params):
@@ -91,12 +89,13 @@ def test_norm_params_meta_roundtrip(params, tmp_path):
 
 def test_to_dict_key_names_match_meta_contract(params):
     d = params.to_dict()
-    assert d["wind_speed_kt_mean"] == params.wind_speed_mean_kt
-    assert d["wind_speed_kt_std"] == params.wind_speed_std_kt
+    assert d["u_mean"] == params.u_mean
+    assert d["u_std"] == params.u_std
+    assert d["v_mean"] == params.v_mean
+    assert d["v_std"] == params.v_std
     assert set(d) == {
         "centre_lat", "centre_lon", "range_km", "max_alt_ft",
-        "wind_speed_kt_mean", "wind_speed_kt_std",
-        "log_speed_mean", "log_speed_std",
+        "u_mean", "u_std", "v_mean", "v_std",
     }
 
 

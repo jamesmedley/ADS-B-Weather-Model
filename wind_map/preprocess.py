@@ -7,11 +7,10 @@ Normalisation (data-driven, stored in meta.json):
   lat/lon : converted to local km coordinates, centred at dataset
             median, scaled to ~[-1, 1] by isotropic range_km
   altitude: log(1 + ft) / log(1 + max_alt_ft)  ->  [0, ~1]
-  wind_dir: encoded as (sin, cos) to handle circularity
-  wind_speed: log(1 + kt), then z-scored
+  wind    : encoded as meteorological (u, v) components, z-scored
 
-Network input x  -> [lat_norm, lon_norm, alt_norm]          (dim=3)
-Network output y -> [wind_dir_sin, wind_dir_cos, speed_norm] (dim=3)
+Network input x  -> [lat_norm, lon_norm, alt_norm]  (dim=3)
+Network output y -> [wind_u_norm, wind_v_norm]       (dim=2)
 """
 
 import os
@@ -36,10 +35,10 @@ class NormParams:
     centre_lon: float
     range_km: float          # isotropic half-width, km (99th %ile)
     max_alt_ft: float        # 99th percentile altitude
-    wind_speed_mean_kt: float
-    wind_speed_std_kt: float
-    log_speed_mean: float    # mean of log(1 + wind_speed_kt)
-    log_speed_std: float     # std  of log(1 + wind_speed_kt)
+    u_mean: float            # mean of meteorological u component (kt)
+    u_std: float             # std  of meteorological u component (kt)
+    v_mean: float            # mean of meteorological v component (kt)
+    v_std: float             # std  of meteorological v component (kt)
 
     @property
     def km_per_deg_lon(self) -> float:
@@ -50,15 +49,29 @@ class NormParams:
         with open(meta_path) as f:
             meta = json.load(f)
         n = meta["normalisation"]
+        if "u_mean" in n:
+            return cls(
+                centre_lat=n["centre_lat"],
+                centre_lon=n["centre_lon"],
+                range_km=n["range_km"],
+                max_alt_ft=n["max_alt_ft"],
+                u_mean=n["u_mean"],
+                u_std=n["u_std"],
+                v_mean=n["v_mean"],
+                v_std=n["v_std"],
+            )
+        # Backward compat: old (sin, cos, speed) cache
+        ws_mean = n.get("wind_speed_kt_mean", 35.0)
+        ws_std = n.get("wind_speed_kt_std", 22.0)
+        rms = math.sqrt(ws_mean**2 + ws_std**2)
+        uv_std = rms / math.sqrt(2)
         return cls(
             centre_lat=n["centre_lat"],
             centre_lon=n["centre_lon"],
             range_km=n["range_km"],
             max_alt_ft=n["max_alt_ft"],
-            wind_speed_mean_kt=n["wind_speed_kt_mean"],
-            wind_speed_std_kt=n["wind_speed_kt_std"],
-            log_speed_mean=n["log_speed_mean"],
-            log_speed_std=n["log_speed_std"],
+            u_mean=0.0, u_std=uv_std,
+            v_mean=0.0, v_std=uv_std,
         )
 
     def to_dict(self) -> dict:
@@ -67,10 +80,10 @@ class NormParams:
             "centre_lon": self.centre_lon,
             "range_km": self.range_km,
             "max_alt_ft": self.max_alt_ft,
-            "wind_speed_kt_mean": self.wind_speed_mean_kt,
-            "wind_speed_kt_std": self.wind_speed_std_kt,
-            "log_speed_mean": self.log_speed_mean,
-            "log_speed_std": self.log_speed_std,
+            "u_mean": self.u_mean,
+            "u_std": self.u_std,
+            "v_mean": self.v_mean,
+            "v_std": self.v_std,
         }
 
 
@@ -90,6 +103,9 @@ MIN_AIRCRAFT = 2
 LAT_RANGE_DEG = 0.63
 LON_RANGE_DEG = 1.00
 
+_RMS_SPEED = math.sqrt(WIND_SPEED_MEAN**2 + WIND_SPEED_STD**2)
+_UV_STD = _RMS_SPEED / math.sqrt(2)
+
 LEGACY_PARAMS = NormParams(
     centre_lat=CENTRE_LAT,
     centre_lon=CENTRE_LON,
@@ -98,10 +114,8 @@ LEGACY_PARAMS = NormParams(
         (LON_RANGE_DEG * 111.0 * math.cos(math.radians(CENTRE_LON))) ** 2
     ),
     max_alt_ft=MAX_ALT_FT,
-    wind_speed_mean_kt=WIND_SPEED_MEAN,
-    wind_speed_std_kt=WIND_SPEED_STD,
-    log_speed_mean=math.log(1 + WIND_SPEED_MEAN),  # approximate
-    log_speed_std=WIND_SPEED_STD / (1 + WIND_SPEED_MEAN),  # delta approx
+    u_mean=0.0, u_std=_UV_STD,
+    v_mean=0.0, v_std=_UV_STD,
 )
 
 
@@ -123,27 +137,33 @@ def normalise_coords(lat, lon, alt_ft, params: NormParams):
 
 
 def encode_wind(wind_dir_deg, wind_speed_kt, params: NormParams):
-    """Encode wind direction circularly and log-normalise speed.
+    """Encode wind as z-scored meteorological (u, v) components.
 
-    Returns (sin, cos, speed_norm).
+    u = -speed * sin(dir), v = -speed * cos(dir)  (toward-vector),
+    then z-scored with training-set statistics.
+
+    Returns (u_norm, v_norm).
     """
     rad = math.radians(wind_dir_deg)
-    log_speed = math.log(1 + wind_speed_kt)
-    speed_norm = (log_speed - params.log_speed_mean) / params.log_speed_std
-    return (
-        math.sin(rad), math.cos(rad), speed_norm
-    )
+    u = -wind_speed_kt * math.sin(rad)
+    v = -wind_speed_kt * math.cos(rad)
+    u_norm = (u - params.u_mean) / params.u_std
+    v_norm = (v - params.v_mean) / params.v_std
+    return u_norm, v_norm
 
 
-def decode_wind(sin_val, cos_val, speed_norm, params: NormParams):
+def decode_wind(u_norm, v_norm, params: NormParams):
     """Inverse of encode_wind.
 
     Returns (wind_dir_deg [0,360), wind_speed_kt).
     """
-    deg = math.degrees(math.atan2(sin_val, cos_val)) % 360
-    log_speed = speed_norm * params.log_speed_std + params.log_speed_mean
-    speed = math.exp(log_speed) - 1
-    return deg, speed
+    u = u_norm * params.u_std + params.u_mean
+    v = v_norm * params.v_std + params.v_mean
+    speed = math.sqrt(u**2 + v**2)
+    if speed < 1e-12:
+        return 0.0, 0.0
+    direction = math.degrees(math.atan2(-u, -v)) % 360
+    return direction, speed
 
 
 # --- Day-grouped train/val/test split ---
@@ -310,7 +330,7 @@ class WindSnapshotDataset(Dataset):
     """
     Loads snapshots from the .npy cache. Each item is (x, y) where:
         x [N, 3] — (lat_norm, lon_norm, alt_norm)
-        y [N, 3] — (wind_dir_sin, wind_dir_cos, wind_speed_norm)
+        y [N, 2] — (wind_u_norm, wind_v_norm)
     Memory-mapped reads, no per-item parsing.
     """
 
@@ -375,33 +395,54 @@ class WindSnapshotDataset(Dataset):
 
 # --- Collate ---
 
-def _rotate_windfield(x, y, cos_a, sin_a):
-    """Rigidly rotate positions and wind vectors together by angle `a`.
+def _rotate_windfield(x, y, cos_a, sin_a, params=None):
+    """Rigidly rotate positions and wind vectors together by angle ``a``.
 
     Rotates the (lat, lon) position columns counter-clockwise about the
-    origin (an offset at bearing t moves to bearing t - a) and applies
-    the same physical rotation to the wind vectors: y encodes
-    meteorological direction phi (direction wind comes FROM) as
-    (sin phi, cos phi), whose physical "toward" vector points along
-    -(sin phi, cos phi) in (east, north) coordinates; rotating that
-    vector counter-clockwise by `a` subtracts `a` from phi:
-      new_sin = sin(phi - a) = sin*cos(a) - cos*sin(a)
-      new_cos = cos(phi - a) = sin*sin(a) + cos*cos(a)
-    Pairwise distances and the angle between position offsets and wind
-    vectors are preserved. Altitude (x[..., 2]) is invariant under
-    rotation.
+    origin and applies the same rotation to the (u, v) wind components.
 
-    cos_a and sin_a can be scalars or tensors broadcastable with y.
+    When ``params`` is given the rotation is performed in physical (u,v)
+    space then re-normalised.  Without ``params`` the rotation is applied
+    directly to the first two y columns (correct only when those columns
+    already represent an un-normalised 2-D vector).
+
+    Pairwise distances and the angle between position offsets and wind
+    vectors are preserved.  Altitude (x[..., 2]) is invariant.
+
+    Modifies x and y **in place** (the caller should not reuse them).
     """
-    x_rot = x.clone()
+    cos_a = float(cos_a)
+    sin_a = float(sin_a)
+
     lat, lon = x[..., 0], x[..., 1]
-    x_rot[..., 0] = lat * cos_a + lon * sin_a
-    x_rot[..., 1] = -lat * sin_a + lon * cos_a
-    y_rot = y.clone()
-    s, c = y[..., 0], y[..., 1]
-    y_rot[..., 0] = s * cos_a - c * sin_a
-    y_rot[..., 1] = s * sin_a + c * cos_a
-    return x_rot, y_rot
+    new_lat = lat * cos_a + lon * sin_a
+    new_lon = -lat * sin_a + lon * cos_a
+    x[..., 0] = new_lat
+    x[..., 1] = new_lon
+
+    if params is not None:
+        c, s = cos_a, sin_a
+        u_s, u_m = params.u_std, params.u_mean
+        v_s, v_m = params.v_std, params.v_mean
+        a00 = c
+        a01 = -s * v_s / u_s
+        a10 = s * u_s / v_s
+        a11 = c
+        b0 = u_m * (c - 1.0) / u_s - v_m * s / u_s
+        b1 = u_m * s / v_s + v_m * (c - 1.0) / v_s
+        y0, y1 = y[..., 0], y[..., 1]
+        new_y0 = y0 * a00 + y1 * a01 + b0
+        new_y1 = y0 * a10 + y1 * a11 + b1
+        y[..., 0] = new_y0
+        y[..., 1] = new_y1
+    else:
+        u, v = y[..., 0], y[..., 1]
+        new_u = u * cos_a - v * sin_a
+        new_v = u * sin_a + v * cos_a
+        y[..., 0] = new_u
+        y[..., 1] = new_v
+
+    return x, y
 
 
 def pad_batch(
@@ -438,7 +479,46 @@ def pad_batch(
     return context_x, context_y, target_x, target_y, context_mask, target_mask
 
 
-def collate_fn(batch, augment=True, use_coupled_rotation=False):
+def _batch_rotate_positions(xs, cos_a, sin_a):
+    """Rotate first two columns of batched position tensor in-place.
+
+    xs : (B, max_n, 3),  cos_a, sin_a : (B,)
+    """
+    lat = xs[..., 0].clone()
+    lon = xs[..., 1].clone()
+    xs[..., 0] = lat * cos_a[:, None] + lon * sin_a[:, None]
+    xs[..., 1] = -lat * sin_a[:, None] + lon * cos_a[:, None]
+
+
+def _batch_rotate_wind(ys, cos_a, sin_a, params=None):
+    """Rotate first two columns of batched wind tensor in-place.
+
+    ys : (B, max_n, 2),  cos_a, sin_a : (B,)
+    """
+    if params is not None:
+        u_s, u_m = params.u_std, params.u_mean
+        v_s, v_m = params.v_std, params.v_mean
+        c = cos_a[:, None]
+        s = sin_a[:, None]
+        y0 = ys[..., 0]
+        y1 = ys[..., 1]
+        new_y0 = (y0 * c + y1 * (-s * v_s / u_s)
+                  + u_m * (c - 1.0) / u_s
+                  - v_m * s / u_s)
+        new_y1 = (y0 * (s * u_s / v_s) + y1 * c
+                  + u_m * s / v_s
+                  + v_m * (c - 1.0) / v_s)
+        ys[..., 0] = new_y0
+        ys[..., 1] = new_y1
+    else:
+        u = ys[..., 0].clone()
+        v = ys[..., 1].clone()
+        ys[..., 0] = u * cos_a[:, None] - v * sin_a[:, None]
+        ys[..., 1] = u * sin_a[:, None] + v * cos_a[:, None]
+
+
+def collate_fn(batch, augment=True, use_coupled_rotation=False,
+               params=None):
     """
     Split each snapshot into context / target, with optional coupled
     rotation augmentation. C is a random subset, T is the full snapshot
@@ -448,15 +528,9 @@ def collate_fn(batch, augment=True, use_coupled_rotation=False):
       use_coupled_rotation : rigidly rotate positions and wind vectors
                              together by a random per-snapshot angle
                              (the only supported augmentation).
+      params : NormParams, required when use_coupled_rotation=True
+               so rotation is applied in physical (u,v) space.
     """
-    B_raw = len(batch)
-    if augment and use_coupled_rotation:
-        angles = torch.rand(B_raw) * (2 * math.pi)
-        cos_a = angles.cos()
-        sin_a = angles.sin()
-    else:
-        cos_a = sin_a = None
-
     context_xs, context_ys, target_xs, target_ys = [], [], [], []
     ctx_lens, tgt_lens = [], []
 
@@ -464,9 +538,6 @@ def collate_fn(batch, augment=True, use_coupled_rotation=False):
         n = x.size(0)
         if n < 2:
             continue
-
-        if cos_a is not None:
-            x, y = _rotate_windfield(x, y, cos_a[i], sin_a[i])
 
         n_ctx = int(n * float(torch.empty(1).uniform_(0.25, 0.75)))
         n_ctx = max(1, min(n_ctx, n - 1))
@@ -486,8 +557,20 @@ def collate_fn(batch, augment=True, use_coupled_rotation=False):
         raise RuntimeError(
             "Empty batch — every item had < 2 valid wind observations.")
 
-    return pad_batch(
+    cx, cy, tx, ty, cm, tm = pad_batch(
         context_xs, context_ys, target_xs, target_ys, ctx_lens, tgt_lens)
+
+    if augment and use_coupled_rotation:
+        B = cx.shape[0]
+        angles = torch.rand(B) * (2 * math.pi)
+        cos_a = angles.cos()
+        sin_a = angles.sin()
+        _batch_rotate_positions(cx, cos_a, sin_a)
+        _batch_rotate_positions(tx, cos_a, sin_a)
+        _batch_rotate_wind(cy, cos_a, sin_a, params=params)
+        _batch_rotate_wind(ty, cos_a, sin_a, params=params)
+
+    return cx, cy, tx, ty, cm, tm
 
 
 def _worker_init(worker_id):

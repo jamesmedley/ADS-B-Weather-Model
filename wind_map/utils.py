@@ -47,7 +47,7 @@ def load_snapshot(cache_dir, snapshot_id):
 
     obs = []
     for i in range(len(x)):
-        wd, ws = decode_wind(y[i, 0], y[i, 1], y[i, 2], params)
+        wd, ws = decode_wind(y[i, 0], y[i, 1], params)
         obs.append({
             "lat": float(lat[i]),
             "lon": float(lon[i]),
