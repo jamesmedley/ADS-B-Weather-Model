@@ -26,6 +26,7 @@ import torch as t
 from torch.utils.data import DataLoader
 
 from wind_map.gp import GaussianProcessRegressor, cache_x_to_gp_x
+from wind_map.uncertainty import uv_to_speed_dir_std
 from wind_map.preprocess import (
     WindSnapshotDataset, day_grouped_split, load_params, collate_fn_val,
 )
@@ -99,17 +100,11 @@ def evaluate(params_path, cache_dir, split="test", context_frac=0.5,
             sq_speed_err_sum += (speed_err ** 2).sum()
             dir_err_sum += dir_err.sum()
 
-            # Physical-space uncertainty via delta method
-            speed_safe = np.maximum(pred_speed, 1e-6)
+            # Physical-space uncertainty via the shared delta method applied
+            # to the u/v vector uncertainty (same path as scripts/test.py).
             su = np.sqrt(var_total[:, 0]) * params.u_std
             sv = np.sqrt(var_total[:, 1]) * params.v_std
-
-            var_dir = ((v_pred / speed_safe**2)**2 * su**2
-                       + (u_pred / speed_safe**2)**2 * sv**2)
-            std_dir = np.degrees(np.sqrt(var_dir))
-            var_speed = ((u_pred / speed_safe)**2 * su**2
-                         + (v_pred / speed_safe)**2 * sv**2)
-            std_speed = np.sqrt(var_speed)
+            std_dir, std_speed = uv_to_speed_dir_std(u_pred, v_pred, su, sv)
 
             cov68_dir += (dir_err <= std_dir).sum()
             cov95_dir += (dir_err <= 2 * std_dir).sum()

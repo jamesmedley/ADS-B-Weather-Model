@@ -7,6 +7,11 @@ Example:
     result = predictor.predict(context, queries, n_samples=50)
     # result['wind_dir_deg'], result['wind_speed_kt']
     # result['wind_dir_std'], result['wind_speed_std']
+    # result['combined_vector_std']   (total 2D vector std)
+
+All uncertainty is computed in the u/v vector representation
+(wind_map.uncertainty) and speed / direction derived from it, keeping this
+consistent with training, validation, testing and the GP baseline.
 """
 
 import torch
@@ -16,7 +21,24 @@ from wind_map.gp import norm_params_from_dict
 from wind_map.preprocess import (
     normalise_coords, encode_wind, NormParams, LEGACY_PARAMS,
 )
-from wind_map.utils import circular_std
+from wind_map.uncertainty import (
+    per_component_total_std,
+    epistemic_aleatoric_uv_std,
+    uv_to_speed_dir_std,
+    combined_vector_std,
+)
+
+# Re-export the shared uncertainty helpers so ``infer`` remains the public
+# home of all uncertainty derivation (single source of truth lives in
+# wind_map.uncertainty).
+__all__ = [
+    'WindPredictor',
+    'compute_uncertainty_components',
+    'per_component_total_std',
+    'epistemic_aleatoric_uv_std',
+    'uv_to_speed_dir_std',
+    'combined_vector_std',
+]
 
 
 # ---------------------------------------------------------------------------
@@ -110,60 +132,43 @@ def compute_uncertainty_components(mu_stack, sigma_stack, params: NormParams,
     """Given mu_stack [n_z, N, 2] and sigma_stack [n_z, N, 2]
     from multiple latent draws, return epistemic and aleatoric uncertainty.
 
-    Aleatoric direction std is computed via MC integration of the
-    predictive distribution. Aleatoric speed std uses the exact Jacobian.
-    Epistemic std is the standard deviation of z-draw means.
+    Uncertainty is first decomposed in the u/v vector representation
+    (epistemic = spread of z-draw means; aleatoric = mean decoder variance),
+    then speed / direction std are *derived* from those vector quantities with
+    the shared delta method (see wind_map.uncertainty). This keeps the
+    decomposition consistent with training, validation, testing and the GP.
+
+    ``mc_samples`` and ``seed`` are kept for backward compatibility but are no
+    longer used: direction uncertainty now flows from the vector covariance
+    (deterministically) rather than a circular/directional MC integration.
 
     Returns dict with keys:
         epistemic_dir_std, epistemic_speed_std,
-        aleatoric_dir_std, aleatoric_speed_std
+        aleatoric_dir_std, aleatoric_speed_std,
+        and the raw vector components:
+        epistemic_u_std, epistemic_v_std, aleatoric_u_std, aleatoric_v_std
     """
-    n_z, n_pts = mu_stack.shape[:2]
-    u_mu = mu_stack[..., 0]
-    v_mu = mu_stack[..., 1]
+    # Decompose in u/v vector space (physical units).
+    epi_u, epi_v, ale_u, ale_v = epistemic_aleatoric_uv_std(
+        mu_stack, sigma_stack, params)
 
-    # Decode each z-draw's mu to physical wind
-    sample_dirs = np.empty_like(u_mu)
-    sample_speeds = np.empty_like(u_mu)
-    for z in range(n_z):
-        d, s = _uv_to_physical(u_mu[z], v_mu[z], params)
-        sample_dirs[z] = d
-        sample_speeds[z] = s
+    # Mean physical vector across latent draws (linear in u/v, so the mean of
+    # the means).
+    u_mean = mu_stack[..., 0].mean(axis=0) * params.u_std + params.u_mean
+    v_mean = mu_stack[..., 1].mean(axis=0) * params.v_std + params.v_mean
 
-    # --- Epistemic: variance of z-draw means ---
-    epistemic_dir_std = circular_std(sample_dirs, axis=0)
-    epistemic_speed_std = sample_speeds.std(axis=0, ddof=1)
-
-    # --- Aleatoric speed: Jacobian-based ---
-    u = u_mu * params.u_std + params.u_mean
-    v = v_mu * params.v_std + params.v_mean
-    speed = np.maximum(np.sqrt(u**2 + v**2), 1e-6)
-    sigma_u = sigma_stack[..., 0] * params.u_std
-    sigma_v = sigma_stack[..., 1] * params.v_std
-
-    ale_speed_var = ((u / speed)**2 * sigma_u**2
-                     + (v / speed)**2 * sigma_v**2)
-    aleatoric_speed_std = np.sqrt(ale_speed_var.mean(axis=0))
-
-    # --- Aleatoric direction: MC integration ---
-    rng = np.random.default_rng(seed)
-    K = min(mc_samples, 10)
-    within_z_std = np.empty((n_z, n_pts))
-    for z in range(n_z):
-        eps_u = rng.normal(0, 1, (K, n_pts)) * sigma_u[z]
-        eps_v = rng.normal(0, 1, (K, n_pts)) * sigma_v[z]
-        mc_u = u[z] + eps_u
-        mc_v = v[z] + eps_v
-        mc_dirs = np.degrees(np.arctan2(-mc_u, -mc_v)) % 360
-        within_z_std[z] = circular_std(mc_dirs, axis=0)
-
-    aleatoric_dir_std = within_z_std.mean(axis=0)
+    epi_speed, epi_dir = uv_to_speed_dir_std(u_mean, v_mean, epi_u, epi_v)
+    ale_speed, ale_dir = uv_to_speed_dir_std(u_mean, v_mean, ale_u, ale_v)
 
     return {
-        'epistemic_dir_std': epistemic_dir_std,
-        'epistemic_speed_std': epistemic_speed_std,
-        'aleatoric_dir_std': aleatoric_dir_std,
-        'aleatoric_speed_std': aleatoric_speed_std,
+        'epistemic_dir_std': epi_dir,
+        'epistemic_speed_std': epi_speed,
+        'aleatoric_dir_std': ale_dir,
+        'aleatoric_speed_std': ale_speed,
+        'epistemic_u_std': epi_u,
+        'epistemic_v_std': epi_v,
+        'aleatoric_u_std': ale_u,
+        'aleatoric_v_std': ale_v,
     }
 
 
@@ -214,8 +219,19 @@ class WindPredictor:
 
         For each of n_samples latent z-draws from the prior, computes
         mu(z) and sigma(z). The predictive mean is E[mu(z)] over draws.
-        Total uncertainty (sqrt(Var(mu) + E[sigma^2])) combines epistemic
-        and aleatoric components analytically — no MC sampling noise.
+        Uncertainty is computed in the u/v vector representation via the law
+        of total variance (epistemic + aleatoric analytically -- no MC sampling
+        noise), then speed / direction std are derived from it with the shared
+        delta method.
+
+        Returns dict with keys:
+            wind_dir_deg, wind_speed_kt,
+            wind_dir_std, wind_speed_std,
+            wind_u_std, wind_v_std, combined_vector_std,
+            epistemic_dir_std, epistemic_speed_std,
+            aleatoric_dir_std, aleatoric_speed_std,
+            epistemic_u_std, epistemic_v_std,
+            aleatoric_u_std, aleatoric_v_std,
         """
         context_x, context_y = self._obs_to_tensors(context_observations)
         target_x = self._queries_to_tensor(query_points)
@@ -234,27 +250,30 @@ class WindPredictor:
 
         # Mean predictions from mu across z-draws (no aleatoric noise)
         mean_mu = mu_stack.mean(axis=0)
+        u_mean = mean_mu[..., 0] * self.params.u_std + self.params.u_mean
+        v_mean = mean_mu[..., 1] * self.params.v_std + self.params.v_mean
         dirs, speeds = _uv_to_physical(
             mean_mu[..., 0], mean_mu[..., 1], self.params)
-        mean_dirs = dirs
-        mean_speeds = speeds
 
-        # Epistemic & aleatoric components
+        # Total per-component u/v std (law of total variance, physical units)
+        sigma_u, sigma_v = per_component_total_std(
+            mu_stack, sigma_stack, self.params)
+        # Derive speed / direction std from the vector uncertainty
+        wind_speed_std, wind_dir_std = uv_to_speed_dir_std(
+            u_mean, v_mean, sigma_u, sigma_v)
+        combined_vec_std = combined_vector_std(sigma_u, sigma_v)
+
+        # Epistemic & aleatoric decomposition (also in u/v then derived)
         components = compute_uncertainty_components(
             mu_stack, sigma_stack, self.params)
 
-        # Total uncertainty: sqrt(Var(mu) + E[sigma^2]) — analytic
-        total_dir_std = np.sqrt(
-            components['epistemic_dir_std']**2
-            + components['aleatoric_dir_std']**2)
-        total_speed_std = np.sqrt(
-            components['epistemic_speed_std']**2
-            + components['aleatoric_speed_std']**2)
-
         return {
-            'wind_dir_deg': mean_dirs,
-            'wind_speed_kt': mean_speeds,
-            'wind_dir_std': total_dir_std,
-            'wind_speed_std': total_speed_std,
+            'wind_dir_deg': dirs,
+            'wind_speed_kt': speeds,
+            'wind_dir_std': wind_dir_std,
+            'wind_speed_std': wind_speed_std,
+            'wind_u_std': sigma_u,
+            'wind_v_std': sigma_v,
+            'combined_vector_std': combined_vec_std,
             **components,
         }

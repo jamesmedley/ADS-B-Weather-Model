@@ -2,11 +2,14 @@
 visualise_wind.py — Plot predicted wind field as a quiver
 with uncertainty heatmap and basemap variants.
 
-Saves three images from each run:
+Saves four images from each run:
   - wind_field_uncertainty_speed.png     — inferno speed-uncertainty
                                   heatmap behind the quiver (grey arrows)
   - wind_field_uncertainty_direction.png — inferno direction-uncertainty
                                   heatmap behind the quiver (grey arrows)
+  - wind_field_uncertainty_combined.png  — inferno combined (speed +
+                                  direction) vector-uncertainty heatmap
+                                  behind the quiver (grey arrows)
   - wind_field_basemap.png               — geographical basemap behind the
                                   quiver (speed-coloured arrows)
 
@@ -42,7 +45,8 @@ from wind_map.utils import (
 
 def plot_wind(checkpoint, alt_ft, context, n_samples,
               n_lat, n_lon, output_uncertainty_speed,
-              output_uncertainty_direction, output_basemap,
+              output_uncertainty_direction, output_uncertainty_combined,
+              output_basemap,
               num_hidden, num_latents=None,
               latent_layers=4, deterministic_layers=4,
               num_decoder_layers=None,
@@ -136,34 +140,38 @@ def plot_wind(checkpoint, alt_ft, context, n_samples,
 
     heat_dir_std = heat_result["wind_dir_std"].reshape(n_lat * 3, n_lon * 3)
     heat_spd_std = heat_result["wind_speed_std"].reshape(n_lat * 3, n_lon * 3)
+    heat_vec_std = heat_result["combined_vector_std"].reshape(
+        n_lat * 3, n_lon * 3)
 
     def _pct_normalise(arr, lo=2, hi=98):
         vmin = np.percentile(arr, lo)
         vmax = np.percentile(arr, hi)
         return np.clip((arr - vmin) / (vmax - vmin + 1e-9), 0, 1)
 
-    heat_dir_unc = _pct_normalise(heat_dir_std)
-    heat_spd_unc = _pct_normalise(heat_spd_std)
+    heat_maps = {
+        "Speed": _pct_normalise(heat_spd_std),
+        "Direction": _pct_normalise(heat_dir_std),
+        "Combined (Speed + Direction)": _pct_normalise(heat_vec_std),
+    }
 
     heat_mx, heat_my = lonlat_to_mercator(heat_lon, heat_lat)
 
     # ------------------------------------------------------------------
-    # 3) Uncertainty images  — speed and direction heatmaps
+    # 3) Uncertainty images  — speed, direction and combined vector heatmaps
     # ------------------------------------------------------------------
-    _save_uncertainty(
-        output_uncertainty_speed, mx, my, u_scaled, v_scaled,
-        heat_spd_unc, heat_mx, heat_my,
-        obs_mx, obs_my, ou_s, ov_s, obs_spd, obs_alt,
-        x_min, x_max, y_min, y_max,
-        alt_ft, snapshot_time, snapshot_id,
-        component="Speed")
-    _save_uncertainty(
-        output_uncertainty_direction, mx, my, u_scaled, v_scaled,
-        heat_dir_unc, heat_mx, heat_my,
-        obs_mx, obs_my, ou_s, ov_s, obs_spd, obs_alt,
-        x_min, x_max, y_min, y_max,
-        alt_ft, snapshot_time, snapshot_id,
-        component="Direction")
+    outputs = {
+        "Speed": output_uncertainty_speed,
+        "Direction": output_uncertainty_direction,
+        "Combined (Speed + Direction)": output_uncertainty_combined,
+    }
+    for component, out_path in outputs.items():
+        _save_uncertainty(
+            out_path, mx, my, u_scaled, v_scaled,
+            heat_maps[component], heat_mx, heat_my,
+            obs_mx, obs_my, ou_s, ov_s, obs_spd, obs_alt,
+            x_min, x_max, y_min, y_max,
+            alt_ft, snapshot_time, snapshot_id,
+            component=component)
 
 
 # ---------------------------------------------------------------------------
@@ -298,7 +306,8 @@ if __name__ == "__main__":
     p.add_argument("--output", default="outputs/imgs/wind_field.png",
                    help=(
                        "Base output path; saves _uncertainty_speed,"
-                       " _uncertainty_direction and _basemap variants"))
+                       " _uncertainty_direction, _uncertainty_combined"
+                       " and _basemap variants"))
     p.add_argument("--hidden", type=int, default=128)
     p.add_argument("--num_latents", type=int, default=None,
                    help=('Number of latent dimensions '
@@ -356,6 +365,7 @@ if __name__ == "__main__":
     root, ext = os.path.splitext(args.output)
     uncertainty_speed_path = f"{root}_uncertainty_speed{ext}"
     uncertainty_direction_path = f"{root}_uncertainty_direction{ext}"
+    uncertainty_combined_path = f"{root}_uncertainty_combined{ext}"
     basemap_path = f"{root}_basemap{ext}"
 
     plot_wind(
@@ -367,6 +377,7 @@ if __name__ == "__main__":
         n_lon=args.grid_lon,
         output_uncertainty_speed=uncertainty_speed_path,
         output_uncertainty_direction=uncertainty_direction_path,
+        output_uncertainty_combined=uncertainty_combined_path,
         output_basemap=basemap_path,
         num_hidden=args.hidden,
         num_latents=args.num_latents,

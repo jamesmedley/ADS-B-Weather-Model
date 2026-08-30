@@ -3,7 +3,8 @@ visualise_uncertainty_components.py — Side-by-side aleatoric
 vs epistemic uncertainty maps.
 
 Splits the model's total predictive uncertainty into two
-components:
+components (each decomposed in the u/v vector representation, then
+combined as sqrt(sigma_u^2 + sigma_v^2)):
   - Aleatoric: E[sigma^2] — learned noise the model can't reduce
   - Epistemic: Var(mu) — uncertainty from latent space
 
@@ -83,11 +84,17 @@ def split_snapshot_ids(cache_dir, split):
     return {"train": train_ids, "val": val_ids, "test": test_ids}[split]
 
 
-def combined_unc(dir_std, speed_std, n_lat, n_lon):
-    """Normalised 0.5*(dir + speed) composite uncertainty map."""
-    d = dir_std.reshape(n_lat, n_lon)
-    s = speed_std.reshape(n_lat, n_lon)
-    return 0.5 * (d / (d.max() + 1e-9) + s / (s.max() + 1e-9))
+def combined_unc(u_std, v_std, n_lat, n_lon):
+    """Combined u/v vector uncertainty = sqrt(u_std^2 + v_std^2).
+
+    Uncertainty is combined in the vector representation (the model's native
+    output) rather than averaging separately-normalised speed/direction maps.
+    Modulo a final 0-1 normalisation done by the caller-independent scaling,
+    this is sqrt(trace(Sigma)) of the predictive covariance.
+    """
+    u = np.asarray(u_std).reshape(n_lat, n_lon)
+    v = np.asarray(v_std).reshape(n_lat, n_lon)
+    return np.sqrt(np.maximum(u**2 + v**2, 0.0))
 
 
 def compute_single(model, context, alt_ft, n_samples, n_lat, n_lon, device,
@@ -149,15 +156,18 @@ def plot_components(result, lat_grid, lon_grid, alt_ft, n_lat, n_lon, output,
                     averaged=False, n_used=None, all_context_lat=None,
                     all_context_lon=None):
     aleatoric_map = combined_unc(
-        result['aleatoric_dir_std'],
-        result['aleatoric_speed_std'], n_lat, n_lon)
+        result['aleatoric_u_std'],
+        result['aleatoric_v_std'], n_lat, n_lon)
     epistemic_map = combined_unc(
-        result['epistemic_dir_std'],
-        result['epistemic_speed_std'], n_lat, n_lon)
+        result['epistemic_u_std'],
+        result['epistemic_v_std'], n_lat, n_lon)
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 8))
     titles = ["Aleatoric (E[sigma^2])", "Epistemic (Var(mu))"]
     maps = [aleatoric_map, epistemic_map]
+    suptitle_note = (
+        "(each panel: combined u/v vector std "
+        "sqrt(su^2+sv^2), independently normalised 0-1)")
 
     for ax, unc_map, title in zip(axes, maps, titles):
         ax.imshow(
@@ -196,7 +206,7 @@ def plot_components(result, lat_grid, lon_grid, alt_ft, n_lat, n_lon, output,
         suptitle += f" | snapshot {snapshot_time}"
     elif snapshot_id:
         suptitle += f" | snapshot {snapshot_id}"
-    suptitle += "\n(each panel independently normalised 0-1)"
+    suptitle += f"\n{suptitle_note}"
     fig.suptitle(suptitle, fontsize=12)
 
     plt.tight_layout()

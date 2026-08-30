@@ -19,6 +19,7 @@ from tqdm import tqdm
 
 from wind_map.logging import setup_logging
 from wind_map.network import LatentModel
+from wind_map.uncertainty import uv_to_speed_dir_std
 from wind_map.preprocess import (
     WindSnapshotDataset, day_grouped_split,
     collate_fn, collate_fn_val, _worker_init,
@@ -510,18 +511,14 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
                 speed_sq_err_sum += (speed_err[m] ** 2).sum()
                 dir_abs_err_sum += dir_err[m].sum()
 
-                # Coverage: 1s / 2s intervals via delta-method approximation
+                # Coverage: 1s / 2s intervals. Uncertainty is derived from the
+                # u/v vector representation (single latent draw here, so the
+                # per-component std is the decoder's aleatoric sigma) via the
+                # shared delta method -- same code path as test.py / infer.py.
                 sigma_u = sigma_np[..., 0] * norm_params.u_std
                 sigma_v = sigma_np[..., 1] * norm_params.v_std
-                speed_pred_safe = np.maximum(pred_speed, 1e-6)
-
-                var_speed = ((u_pred / speed_pred_safe)**2 * sigma_u**2
-                             + (v_pred / speed_pred_safe)**2 * sigma_v**2)
-                std_speed_kt = np.sqrt(var_speed)
-
-                var_dir_rad = ((v_pred / speed_pred_safe**2)**2 * sigma_u**2
-                               + (u_pred / speed_pred_safe**2)**2 * sigma_v**2)
-                std_dir_deg = np.degrees(np.sqrt(var_dir_rad))
+                std_speed_kt, std_dir_deg = uv_to_speed_dir_std(
+                    u_pred, v_pred, sigma_u, sigma_v)
 
                 cov_68_sum += (np.abs(speed_err[m]) <= std_speed_kt[m]).sum()
                 cov_68_sum += (dir_err[m] <= std_dir_deg[m]).sum()

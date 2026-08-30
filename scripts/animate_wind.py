@@ -176,14 +176,13 @@ def build_wind_gif(checkpoint, alt_ft, context, n_samples,
 
     dirs = result["wind_dir_deg"].reshape(n_lat, n_lon)
     speed = result["wind_speed_kt"].reshape(n_lat, n_lon)
-    dir_std = result["wind_dir_std"].reshape(n_lat, n_lon)
-    spd_std = result["wind_speed_std"].reshape(n_lat, n_lon)
 
     u, v = wind_to_uv(dirs, speed)
 
-    unc = 0.5 * (
-            dir_std / (dir_std.max() + 1e-9) +
-            spd_std / (spd_std.max() + 1e-9))
+    # Combined total 2D vector std (sqrt(sigma_u^2 + sigma_v^2)) -- the
+    # rotation-invariant scalar that mixes speed and direction uncertainty.
+    vec_std = result["combined_vector_std"].reshape(n_lat, n_lon)
+    unc = vec_std / (vec_std.max() + 1e-9)
 
     u_interp = RegularGridInterpolator((lat_axis, lon_axis), u,
                                        bounds_error=False, fill_value=0.0)

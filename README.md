@@ -2,7 +2,7 @@
 
 An Attentive Neural Process (ANP) that predicts wind vectors from ADS-B aircraft observations. Given a set of aircraft-derived wind measurements (direction and speed) at known positions, the model learns to interpolate wind fields across a region and quantify its own uncertainty.
 
-![Predicted wind field uncertainty](outputs/imgs/wind_field_uncertainty.png)
+![Predicted wind field uncertainty](outputs/imgs/wind_field_uncertainty_combined.png)
 
 ![Predicted wind field basemap](outputs/imgs/wind_field_basemap.png)
 
@@ -83,7 +83,15 @@ Generates convergence, objective, and evaluations plots from `hp_optim_results.p
 python scripts/visualise_wind.py --checkpoint checkpoint/best_model.pth.tar --cache data/npy_cache --alt_ft 35000
 ```
 
-Plots predicted wind as a quiver map with uncertainty heatmap. Use `--context_json path/to/context.json` instead of `--cache` to predict from custom observations.
+Plots predicted wind as a quiver map with uncertainty heatmaps. Saves speed,
+direction and combined (speed + direction) vector-uncertainty images plus a
+basemap variant. Use `--context_json path/to/context.json` instead of
+`--cache` to predict from custom observations.
+
+All speed / direction uncertainty is derived from the model's 2D u/v wind
+vector via a single shared implementation (`wind_map/uncertainty.py`), keeping
+training, validation, testing, the GP baseline and visualisation consistent.
+The combined map is `sqrt(sigma_u^2 + sigma_v^2)` (the total 2D vector std).
 
 ### Animate wind flow
 

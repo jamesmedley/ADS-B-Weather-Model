@@ -6,11 +6,14 @@ Reuses make_grid / wind_to_uv / lonlat_to_mercator from wind_map.utils and the
 array-level renderers _save_basemap / _save_uncertainty from visualise_wind.py,
 so the output looks identical and is directly comparable.
 
-Saves three images from each run:
+Saves four images from each run:
   - wind_field_gp_uncertainty_speed.png     — inferno speed-uncertainty
                                   heatmap behind the quiver (grey arrows)
   - wind_field_gp_uncertainty_direction.png — inferno direction-uncertainty
                                   heatmap behind the quiver (grey arrows)
+  - wind_field_gp_uncertainty_combined.png  — inferno combined (speed +
+                                  direction) vector-uncertainty heatmap
+                                  behind the quiver (grey arrows)
   - wind_field_gp_basemap.png               — geographical basemap behind the
                                   quiver (speed-coloured arrows)
 
@@ -44,7 +47,7 @@ from scripts.visualise_wind import (  # noqa: E402
 
 def plot_wind_gp(params_path, alt_ft, context, n_lat, n_lon,
                  output_uncertainty_speed, output_uncertainty_direction,
-                 output_basemap,
+                 output_uncertainty_combined, output_basemap,
                  snapshot_id=None, snapshot_time=None,
                  norm_params=None, lat_range_deg=None, lon_range_deg=None):
     predictor = GaussianProcessPredictor(params_path, params=norm_params)
@@ -117,32 +120,36 @@ def plot_wind_gp(params_path, alt_ft, context, n_lat, n_lon,
 
     heat_dir_std = heat_result["wind_dir_std"].reshape(n_lat * 3, n_lon * 3)
     heat_spd_std = heat_result["wind_speed_std"].reshape(n_lat * 3, n_lon * 3)
+    heat_vec_std = heat_result["combined_vector_std"].reshape(
+        n_lat * 3, n_lon * 3)
 
     def _pct_normalise(arr, lo=2, hi=98):
         vmin = np.percentile(arr, lo)
         vmax = np.percentile(arr, hi)
         return np.clip((arr - vmin) / (vmax - vmin + 1e-9), 0, 1)
 
-    heat_dir_unc = _pct_normalise(heat_dir_std)
-    heat_spd_unc = _pct_normalise(heat_spd_std)
+    heat_maps = {
+        "Speed": _pct_normalise(heat_spd_std),
+        "Direction": _pct_normalise(heat_dir_std),
+        "Combined (Speed + Direction)": _pct_normalise(heat_vec_std),
+    }
 
     heat_mx, heat_my = lonlat_to_mercator(heat_lon, heat_lat)
 
     # Uncertainty images
-    _save_uncertainty(
-        output_uncertainty_speed, mx, my, u_scaled, v_scaled,
-        heat_spd_unc, heat_mx, heat_my,
-        obs_mx, obs_my, ou_s, ov_s, obs_spd, obs_alt,
-        x_min, x_max, y_min, y_max,
-        alt_ft, snapshot_time, snapshot_id,
-        component="Speed")
-    _save_uncertainty(
-        output_uncertainty_direction, mx, my, u_scaled, v_scaled,
-        heat_dir_unc, heat_mx, heat_my,
-        obs_mx, obs_my, ou_s, ov_s, obs_spd, obs_alt,
-        x_min, x_max, y_min, y_max,
-        alt_ft, snapshot_time, snapshot_id,
-        component="Direction")
+    outputs = {
+        "Speed": output_uncertainty_speed,
+        "Direction": output_uncertainty_direction,
+        "Combined (Speed + Direction)": output_uncertainty_combined,
+    }
+    for component, out_path in outputs.items():
+        _save_uncertainty(
+            out_path, mx, my, u_scaled, v_scaled,
+            heat_maps[component], heat_mx, heat_my,
+            obs_mx, obs_my, ou_s, ov_s, obs_spd, obs_alt,
+            x_min, x_max, y_min, y_max,
+            alt_ft, snapshot_time, snapshot_id,
+            component=component)
 
 
 if __name__ == "__main__":
@@ -153,7 +160,8 @@ if __name__ == "__main__":
     p.add_argument("--alt_ft", type=float, default=35000)
     p.add_argument("--output", default="outputs/imgs/wind_field_gp.png",
                    help="Base output path; saves _uncertainty_speed,"
-                        " _uncertainty_direction and _basemap variants")
+                        " _uncertainty_direction, _uncertainty_combined"
+                        " and _basemap variants")
     p.add_argument("--samples", type=int, default=1000,
                    help="Accepted for parity with visualise_wind.py (ignored)")
     p.add_argument("--grid_lat", type=int, default=25)
@@ -200,6 +208,7 @@ if __name__ == "__main__":
     root, ext = os.path.splitext(args.output)
     uncertainty_speed_path = f"{root}_uncertainty_speed{ext}"
     uncertainty_direction_path = f"{root}_uncertainty_direction{ext}"
+    uncertainty_combined_path = f"{root}_uncertainty_combined{ext}"
     basemap_path = f"{root}_basemap{ext}"
 
     plot_wind_gp(
@@ -210,6 +219,7 @@ if __name__ == "__main__":
         n_lon=args.grid_lon,
         output_uncertainty_speed=uncertainty_speed_path,
         output_uncertainty_direction=uncertainty_direction_path,
+        output_uncertainty_combined=uncertainty_combined_path,
         output_basemap=basemap_path,
         snapshot_id=sid,
         snapshot_time=snapshot_time,

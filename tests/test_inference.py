@@ -75,34 +75,55 @@ def test_predictor_output_contract(checkpoint):
     expected_keys = {
         'wind_dir_deg', 'wind_speed_kt',
         'wind_dir_std', 'wind_speed_std',
+        'wind_u_std', 'wind_v_std', 'combined_vector_std',
         'epistemic_dir_std', 'epistemic_speed_std',
         'aleatoric_dir_std', 'aleatoric_speed_std',
+        'epistemic_u_std', 'epistemic_v_std',
+        'aleatoric_u_std', 'aleatoric_v_std',
     }
     assert set(result) == expected_keys
     dirs = np.asarray(result['wind_dir_deg'])
     speeds = np.asarray(result['wind_speed_kt'])
     assert ((dirs >= 0) & (dirs < 360)).all()
     assert (speeds > -1e-6).all()
-    for key in ('wind_dir_std', 'wind_speed_std'):
+    for key in ('wind_dir_std', 'wind_speed_std',
+                'combined_vector_std'):
         std = np.asarray(result[key])
         assert (std >= 0).all()
         assert np.isfinite(std).all()
 
 
-def test_predictor_total_uncertainty_combines_components(checkpoint):
+def test_predictor_total_uncertainty_derived_from_vector(checkpoint):
+    from wind_map.uncertainty import uv_to_speed_dir_std
+    ckpt_path, _ = checkpoint
+    predictor = WindPredictor(ckpt_path, device='cpu')
+    ctx, qry = make_context(), make_queries()
+    result = predictor.predict(ctx, qry, n_samples=3)
+
+    # The returned polar stds must be exactly what the shared delta method
+    # produces from the returned per-component u/v stds -- proving that
+    # speed/direction uncertainty is derived from the vector uncertainty, not
+    # computed separately.
+    dirs = np.asarray(result['wind_dir_deg'])
+    speeds = np.asarray(result['wind_speed_kt'])
+    u_pred = -speeds * np.sin(np.radians(dirs))
+    v_pred = -speeds * np.cos(np.radians(dirs))
+    su = np.asarray(result['wind_u_std'])
+    sv = np.asarray(result['wind_v_std'])
+
+    exp_spd, exp_dir = uv_to_speed_dir_std(u_pred, v_pred, su, sv)
+    assert np.allclose(result['wind_speed_std'], exp_spd, atol=1e-8)
+    assert np.allclose(result['wind_dir_std'], exp_dir, atol=1e-8)
+
+
+def test_predictor_combined_vector_std_is_trace(checkpoint):
     ckpt_path, _ = checkpoint
     predictor = WindPredictor(ckpt_path, device='cpu')
     result = predictor.predict(make_context(), make_queries(),
                                n_samples=3)
-    for total, epi, ale in [
-        ('wind_dir_std', 'epistemic_dir_std',
-         'aleatoric_dir_std'),
-        ('wind_speed_std', 'epistemic_speed_std',
-         'aleatoric_speed_std'),
-    ]:
-        combined = np.sqrt(np.asarray(result[epi]) ** 2
-                           + np.asarray(result[ale]) ** 2)
-        assert np.allclose(result[total], combined, atol=1e-8)
+    combined = np.sqrt(np.asarray(result['wind_u_std']) ** 2
+                       + np.asarray(result['wind_v_std']) ** 2)
+    assert np.allclose(result['combined_vector_std'], combined, atol=1e-8)
 
 
 def test_predictor_deterministic_given_seed(checkpoint):

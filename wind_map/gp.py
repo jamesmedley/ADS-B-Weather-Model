@@ -63,6 +63,9 @@ import torch as t
 from wind_map.preprocess import (
     KM_PER_DEG_LAT, NormParams, encode_wind,
 )
+from wind_map.uncertainty import (
+    uv_to_speed_dir_std, combined_vector_std,
+)
 
 FT_PER_KM = 0.0003048
 
@@ -405,35 +408,38 @@ class GaussianProcessPredictor:
         speed = np.sqrt(u_m**2 + v_m**2)
         dirs = np.degrees(np.arctan2(-u_m, -v_m)) % 360
 
-        # Delta-method uncertainty propagation
-        speed_safe = np.maximum(speed, 1e-6)
+        # Delta-method uncertainty propagation: uncertainty is determined in
+        # the u/v vector representation, then speed / direction std are
+        # derived from it with the shared helpers (same path as the ANP's
+        # infer / training / testing).
         sigma_u = np.sqrt(var_total[:, 0]) * self.params.u_std
         sigma_v = np.sqrt(var_total[:, 1]) * self.params.v_std
+        std_speed, std_dir = uv_to_speed_dir_std(
+            u_m, v_m, sigma_u, sigma_v)
 
-        def _spd_std(su, sv):
-            return np.sqrt((u_m / speed_safe)**2 * su**2
-                           + (v_m / speed_safe)**2 * sv**2)
-
-        def _dir_std(su, sv):
-            return np.degrees(np.sqrt(
-                (v_m / speed_safe**2)**2 * su**2
-                + (u_m / speed_safe**2)**2 * sv**2))
+        epi_u = np.sqrt(var_latent[:, 0]) * self.params.u_std
+        epi_v = np.sqrt(var_latent[:, 1]) * self.params.v_std
+        epi_speed, epi_dir = uv_to_speed_dir_std(u_m, v_m, epi_u, epi_v)
 
         n = mean.shape[0]
-        ale_u = noise2[0] * np.ones(n) * self.params.u_std**2
-        ale_v = noise2[1] * np.ones(n) * self.params.v_std**2
+        ale_u = np.sqrt(noise2[0]) * np.ones(n) * self.params.u_std
+        ale_v = np.sqrt(noise2[1]) * np.ones(n) * self.params.v_std
+        ale_speed, ale_dir = uv_to_speed_dir_std(u_m, v_m, ale_u, ale_v)
 
         return {
             "wind_dir_deg": dirs,
             "wind_speed_kt": speed,
-            "wind_dir_std": _dir_std(sigma_u, sigma_v),
-            "wind_speed_std": _spd_std(sigma_u, sigma_v),
-            "epistemic_dir_std": _dir_std(
-                np.sqrt(var_latent[:, 0]) * self.params.u_std,
-                np.sqrt(var_latent[:, 1]) * self.params.v_std),
-            "epistemic_speed_std": _spd_std(
-                np.sqrt(var_latent[:, 0]) * self.params.u_std,
-                np.sqrt(var_latent[:, 1]) * self.params.v_std),
-            "aleatoric_dir_std": _dir_std(np.sqrt(ale_u), np.sqrt(ale_v)),
-            "aleatoric_speed_std": _spd_std(np.sqrt(ale_u), np.sqrt(ale_v)),
+            "wind_dir_std": std_dir,
+            "wind_speed_std": std_speed,
+            "wind_u_std": sigma_u,
+            "wind_v_std": sigma_v,
+            "combined_vector_std": combined_vector_std(sigma_u, sigma_v),
+            "epistemic_dir_std": epi_dir,
+            "epistemic_speed_std": epi_speed,
+            "aleatoric_dir_std": ale_dir,
+            "aleatoric_speed_std": ale_speed,
+            "epistemic_u_std": epi_u,
+            "epistemic_v_std": epi_v,
+            "aleatoric_u_std": ale_u,
+            "aleatoric_v_std": ale_v,
         }

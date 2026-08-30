@@ -179,8 +179,11 @@ def test_gp_predictor_api_parity_and_determinism(tmp_path, cache):
     expected_keys = {
         "wind_dir_deg", "wind_speed_kt",
         "wind_dir_std", "wind_speed_std",
+        "wind_u_std", "wind_v_std", "combined_vector_std",
         "epistemic_dir_std", "epistemic_speed_std",
         "aleatoric_dir_std", "aleatoric_speed_std",
+        "epistemic_u_std", "epistemic_v_std",
+        "aleatoric_u_std", "aleatoric_v_std",
     }
     assert set(out_a) == expected_keys
     for key in expected_keys:
@@ -188,6 +191,10 @@ def test_gp_predictor_api_parity_and_determinism(tmp_path, cache):
     assert ((out_a["wind_dir_deg"] >= 0)
             & (out_a["wind_dir_deg"] < 360)).all()
     assert (out_a["wind_speed_kt"] > 0).all()
+
+    # Combined vector std must equal sqrt(u^2 + v^2) of the component stds.
+    comb = np.sqrt(out_a["wind_u_std"] ** 2 + out_a["wind_v_std"] ** 2)
+    assert np.allclose(out_a["combined_vector_std"], comb, atol=1e-8)
 
 
 def test_encode_wind_matches_gp_target_encoding(params):

@@ -21,6 +21,9 @@ import torch as t
 from torch.utils.data import DataLoader
 
 from wind_map.infer import load_model_checkpoint
+from wind_map.uncertainty import (
+    per_component_total_std, uv_to_speed_dir_std,
+)
 from wind_map.preprocess import (
     WindSnapshotDataset, day_grouped_split,
     load_params, collate_fn_val,
@@ -108,14 +111,10 @@ def evaluate(checkpoint_path, cache_dir, split='test', num_hidden=None,
         nll_sum += (-log_p_marginal * mask_f).sum().item()
         nll_count += mask_f.sum().item()
 
-        # Point estimate + law-of-total-variance uncertainty
+        # Point estimate over latent draws.
         mean_mu = mu_stack.mean(dim=0)
-        mean_sigma2 = (sigma_stack ** 2).mean(dim=0)
-        var_mu = mu_stack.var(dim=0)
-        total_std = (mean_sigma2 + var_mu).sqrt()
 
         mean_mu_np = mean_mu.cpu().numpy()
-        total_std_np = total_std.cpu().numpy()
         target_y_np = target_y.numpy()
         mask_np = mask.cpu().numpy().astype(bool)
 
@@ -137,19 +136,14 @@ def evaluate(checkpoint_path, cache_dir, split='test', num_hidden=None,
         sq_speed_err_sum += (speed_err[mask_np] ** 2).sum()
         dir_err_sum += dir_err[mask_np].sum()
 
-        # Physical-space coverage: direction (circular) and speed (linear)
-        # using delta-method uncertainty conversion.
-        sigma_u = total_std_np[..., 0] * params.u_std
-        sigma_v = total_std_np[..., 1] * params.v_std
-        speed_safe = np.maximum(pred_speed, 1e-6)
-
-        var_speed = ((u_pred / speed_safe)**2 * sigma_u**2
-                     + (v_pred / speed_safe)**2 * sigma_v**2)
-        std_speed_kt = np.sqrt(var_speed)
-
-        var_dir_rad = ((v_pred / speed_safe**2)**2 * sigma_u**2
-                       + (u_pred / speed_safe**2)**2 * sigma_v**2)
-        std_dir_deg = np.degrees(np.sqrt(var_dir_rad))
+        # Physical-space coverage: direction (circular) and speed (linear),
+        # derived from the u/v vector uncertainty (law of total variance over
+        # latent draws) via the shared delta method -- same code path as
+        # wind_map.train validation, infer.WindPredictor and the GP.
+        sigma_u, sigma_v = per_component_total_std(
+            mu_stack.cpu().numpy(), sigma_stack.cpu().numpy(), params)
+        std_speed_kt, std_dir_deg = uv_to_speed_dir_std(
+            u_pred, v_pred, sigma_u, sigma_v)
 
         m = mask_np
         dir_within_1s = dir_err[m] <= std_dir_deg[m]
