@@ -558,11 +558,12 @@ def train(cache_dir, num_hidden=128, num_latents=None, epochs=200,
         active_pct = 0.0
         kl_max_dim = 0.0
         kl_min_dim = 0.0
-        if kl_dim_sum is not None and n_batches > 0:
+        if kl_dim_sum is not None and n_batches > 0 and num_latents > 0:
             avg_kl_per_dim = kl_dim_sum / n_batches
             active_mask = avg_kl_per_dim > free_bits
             active_pct = (
-                active_mask.sum().item() / num_latents * 100)
+                active_mask.sum().item() / num_latents * 100
+                if num_latents > 0 else 0.0)
             kl_max_dim = avg_kl_per_dim.max().item()
             kl_min_dim = avg_kl_per_dim.min().item()
 

@@ -54,11 +54,16 @@ class LatentModel(nn.Module):
 
         decoder_output_sizes = [num_hidden] * num_decoder_layers + [2 * y_dim]
 
-        self.latent_encoder = LatentEncoder(
-            num_hidden, num_latents,
-            x_dim=x_dim, y_dim=y_dim,
-            num_heads=num_heads, layers=latent_layers,
-            dropout=dropout)
+        if num_latents > 0:
+            self.latent_encoder = LatentEncoder(
+                num_hidden, num_latents,
+                x_dim=x_dim, y_dim=y_dim,
+                num_heads=num_heads, layers=latent_layers,
+                dropout=dropout)
+            representation_size = num_hidden + num_latents
+        else:
+            self.latent_encoder = None
+            representation_size = num_hidden
 
         self.deterministic_encoder = DeterministicEncoder(
             num_hidden,
@@ -67,7 +72,6 @@ class LatentModel(nn.Module):
             dropout=dropout,
             use_dist_bias=use_dist_bias)
 
-        representation_size = num_hidden + num_latents
         decoder_x_dim = x_dim
         self.decoder = Decoder(
             decoder_x_dim, representation_size, decoder_output_sizes,
@@ -78,36 +82,52 @@ class LatentModel(nn.Module):
                 context_mask=None, target_mask=None, kl_weight=1.0):
         num_targets = target_x.size(1)
 
-        # Prior from context
-        prior = self.latent_encoder(context_x, context_y, mask=context_mask)
-
-        if target_y is not None:
-            # Posterior from full target set (training only)
-            posterior = self.latent_encoder(
-                target_x, target_y, mask=target_mask
-            )
-            latent_rep = posterior.rsample()
-        else:
-            posterior = None
-            latent_rep = prior.rsample()
-
-        # Broadcast z to every target point
-        latent_rep = latent_rep.unsqueeze(1).expand(-1, num_targets, -1)
-
         # Deterministic path: cross-attention context -> target
         deterministic_rep = self.deterministic_encoder(
             context_x, context_y, target_x, context_mask=context_mask)
 
-        # Decode to wind distribution parameters
-        representation = t.cat([deterministic_rep, latent_rep], dim=-1)
+        if self.latent_encoder is not None:
+            # Prior from context
+            prior = self.latent_encoder(
+                context_x, context_y, mask=context_mask)
+
+            if target_y is not None:
+                # Posterior from full target set (training only)
+                posterior = self.latent_encoder(
+                    target_x, target_y, mask=target_mask
+                )
+                latent_rep = posterior.rsample()
+            else:
+                posterior = None
+                latent_rep = prior.rsample()
+
+            # Broadcast z to every target point
+            latent_rep = latent_rep.unsqueeze(1).expand(
+                -1, num_targets, -1)
+
+            # Decode to wind distribution parameters
+            representation = t.cat(
+                [deterministic_rep, latent_rep], dim=-1)
+        else:
+            representation = deterministic_rep
+
         dist, mu, sigma = self.decoder(representation, target_x)
 
         if target_y is not None:
             log_p = dist.log_prob(target_y).sum(dim=-1)
-            kl_per_dim = kl_divergence(posterior, prior)
-            kl_per_dim_clamped = t.clamp(kl_per_dim, min=self.free_bits)
-            kl_per_sample = kl_per_dim_clamped.sum(dim=-1)
-            kl = kl_per_sample.unsqueeze(1).expand(-1, num_targets)
+
+            if self.latent_encoder is not None:
+                kl_per_dim = kl_divergence(posterior, prior)
+                kl_per_dim_clamped = t.clamp(
+                    kl_per_dim, min=self.free_bits)
+                kl_per_sample = kl_per_dim_clamped.sum(dim=-1)
+                kl = kl_per_sample.unsqueeze(1).expand(
+                    -1, num_targets)
+            else:
+                kl_per_dim = None
+                kl = t.zeros(
+                    target_x.size(0), num_targets,
+                    device=target_x.device)
 
             if target_mask is not None:
                 mask_f = target_mask.to(log_p.dtype)
@@ -121,7 +141,10 @@ class LatentModel(nn.Module):
                     device=log_p.device
                 )
                 log_p_sum = log_p.sum(dim=1)
-                kl_term = kl_weight * t.mean(kl_per_sample)
+                if self.latent_encoder is not None:
+                    kl_term = kl_weight * t.mean(kl_per_sample)
+                else:
+                    kl_term = t.zeros((), device=log_p.device)
 
             recon = -t.mean(log_p_sum / n_valid)
             loss = recon + kl_term

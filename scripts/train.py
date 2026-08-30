@@ -79,6 +79,9 @@ if __name__ == '__main__':
         help='Rigidly rotate positions and wind vectors together by a '
              'random per-snapshot angle (augmentation)')
     parser.add_argument(
+        '--deterministic_only', action='store_true',
+        help='Disable the latent pathway (num_latents=0)')
+    parser.add_argument(
         '--seed', type=int, default=0,
         help='Master RNG seed for reproducible runs')
     parser.add_argument(
@@ -86,6 +89,12 @@ if __name__ == '__main__':
         help='Path to the universal log file '
              '(default: run.log in the project root)')
     args = parser.parse_args()
+
+    if args.deterministic_only:
+        args.num_latents = 0
+        args.free_bits = 0.0
+        args.kl_warmup_steps = 0
+        args.latent_layers = 0
 
     run_script(lambda: train(
         cache_dir=args.cache,
